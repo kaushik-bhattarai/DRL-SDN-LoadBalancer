@@ -1,19 +1,69 @@
+# DRL-SDN Load Balancer Configuration
+
+# Controller settings
+controller_url: "http://127.0.0.1:8080/sdrlb"
+
+# DRL Agent Configuration
 drl:
-  state_dim: 128      # total state features (hosts metrics + switch port stats)
-  action_dim: 16      # number of hosts (one action = send flow to one host)
-  hidden_dim: 64
-  epsilon_start: 1.0
-  epsilon_min: 0.05
-  epsilon_decay: 0.995
-  learning_rate: 0.001
+  state_dim: 18           # 3 servers * 6 metrics (CPU, Mem, RTT, Load, ConnRate, RTTTrend)
+  action_dim: 3           # Select h1, h2, or h3
+  hidden_dim: 64          # Neural network hidden layer size
+  epsilon_start: 1.0      # Initial exploration rate
+  epsilon_min: 0.05       # Minimum exploration rate
+  epsilon_decay: 0.995    # Epsilon decay per episode
+  learning_rate: 0.0003   # Reduced learning rate for stability
 
+# Training Configuration
 training:
-  episodes: 200
-  episode_duration: 30
-  batch_size: 32
-  memory_size: 10000
-  gamma: 0.99
+  episodes: 200           # Number of training episodes
+  episode_duration: 30    # Duration of each episode in seconds
+  batch_size: 32          # Batch size for training
+  memory_size: 10000      # Replay buffer size
+  gamma: 0.99             # Discount factor for future rewards
 
+# Reward Function Weights
 training_reward_weights:
-  alpha: 10.0   # weight for latency in reward
-  beta: 1.0     # weight for server utilization variance
+  alpha: 1.0              # Weight for latency (reduced from 10.0)
+  beta: 0.5               # Weight for variance (reduced from 1.0)
+
+# Traffic Generation Configuration (for training)
+traffic:
+  enabled: true
+  patterns:
+    - type: "constant"
+      rate: 100            # requests per second
+      duration: 30
+    
+    - type: "bursty"
+      base_rate: 50
+      burst_rate: 500
+      burst_duration: 5    # seconds
+      burst_interval: 15   # seconds between bursts
+      duration: 60
+    
+    - type: "incremental"
+      start_rate: 50
+      end_rate: 500
+      duration: 60
+    
+    - type: "sinusoidal"
+      base_rate: 100
+      amplitude: 200
+      period: 60           # seconds for one full cycle
+      duration: 120
+
+# Network Topology (informational)
+topology:
+  num_servers: 3          # Active servers (h1, h2, h3)
+  num_edge_switches: 8    # Edge switches (200-207)
+  fat_tree_k: 4           # Fat-tree parameter
+
+# Evaluation Settings
+evaluation:
+  num_episodes: 10
+  episode_duration: 30
+
+# Logging
+logging:
+  save_interval: 10       # Save checkpoint every N episodes
+  log_interval: 1         # Print stats every N episodes

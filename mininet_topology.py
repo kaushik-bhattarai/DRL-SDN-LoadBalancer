@@ -1,9 +1,10 @@
 from mininet.topo import Topo
 from mininet.net import Mininet
-from mininet.node import RemoteController
+from mininet.node import RemoteController, OVSSwitch
 from mininet.link import TCLink
 from mininet.log import setLogLevel
 from mininet.cli import CLI
+from functools import partial
 
 class FatTree4(Topo):
     def build(self, k=4):
@@ -27,10 +28,20 @@ class FatTree4(Topo):
                 dpid = f"{edge_base + pod*2 + e:016x}"
                 edges.append(self.addSwitch(f's_edge{pod}_{e}', dpid=dpid))
 
-        # Connect core ↔ aggs (simplified: each core connects to one agg per pod)
-        for i, c in enumerate(cores):
-            for j in range(4):
-                self.addLink(c, aggs[j + (i*1) % 4], bw=100, delay='1ms')
+        # Connect core ↔ aggs (Standard Fat-Tree k=4)
+        # Cores 0,1 connect to Agg 0 in all pods
+        # Cores 2,3 connect to Agg 1 in all pods
+        for pod in range(4):
+            agg0 = aggs[pod * 2]      # First agg in pod
+            agg1 = aggs[pod * 2 + 1]  # Second agg in pod
+            
+            # Connect Agg0 to Core 0 and Core 1
+            self.addLink(agg0, cores[0], bw=100, delay='1ms')
+            self.addLink(agg0, cores[1], bw=100, delay='1ms')
+            
+            # Connect Agg1 to Core 2 and Core 3
+            self.addLink(agg1, cores[2], bw=100, delay='1ms')
+            self.addLink(agg1, cores[3], bw=100, delay='1ms')
 
         # Connect agg ↔ edge in same pod
         for pod in range(4):
@@ -44,19 +55,56 @@ class FatTree4(Topo):
         host_id = 1
         for e in edges:
             for h in range(2):
-                host = self.addHost(f'h{host_id}', cpu=.1)
+                # Assign IP explicitly
+                ip_addr = f'10.0.0.{host_id}/24'
+                mac_addr = f'00:00:00:00:00:{host_id:02x}'
+                
+                host = self.addHost(
+                    f'h{host_id}', 
+                    cpu=.1,
+                    ip=ip_addr,
+                    mac=mac_addr
+                    # NO defaultRoute! Hosts are on same subnet
+                )
                 self.addLink(e, host, bw=100, delay='1ms')
                 host_id += 1
 
 def start_network():
+    """Start Mininet network with remote Ryu controller"""
     topo = FatTree4()
-    net = Mininet(topo=topo, controller=RemoteController, link=TCLink)
+    
+    # Create remote controller
+    c0 = RemoteController('c0', ip='127.0.0.1', port=6633)
+    
+    net = Mininet(
+        topo=topo, 
+        controller=c0,
+        switch=partial(OVSSwitch, protocols='OpenFlow13'),
+        link=TCLink,
+        autoSetMacs=True
+    )
+    
     net.start()
+    
+    # FORCE OpenFlow 1.3 on all switches
+    print("⚡ Forcing OpenFlow 1.3 on all switches...")
+    for sw in net.switches:
+        sw.cmd(f'ovs-vsctl set bridge {sw.name} protocols=OpenFlow13')
+        # Set controller explicitly for each switch to be safe
+        sw.cmd(f'ovs-vsctl set-controller {sw.name} tcp:127.0.0.1:6633')
+    
+    print("\n" + "="*60)
+    print("✅ Mininet network started with Ryu controller")
+    print(f"   Switches: {len(net.switches)}")
+    print("   Controller: 127.0.0.1:6633")
+    print("="*60 + "\n")
+    
     return net
 
 if __name__ == '__main__':
     setLogLevel('info')
     net = start_network()
+    
     # Print all edge switches and connected host ports
     for sw in net.switches:
         if 'edge' in sw.name:
@@ -67,32 +115,6 @@ if __name__ == '__main__':
                     for (host_intf, sw_intf) in conns:
                         print(f"{h.name} -> {sw_intf.name}")
                         
-    print("Mininet started. Use CLI commands below:")
+    print("\nMininet started. Use CLI commands below:")
     CLI(net)          # <- This opens the interactive Mininet CLI
     net.stop()        # <- Network stops when you exit the CLI
-    
-
-# s_core1 → 0001
-# s_core2 → 0002
-# s_core3 → 0003
-# s_core4 → 0004
-
-# s_agg0_0 → 0064 (100)
-# s_agg0_1 → 0065 (101)
-# s_agg1_0 → 0066 (102)
-# s_agg1_1 → 0067 (103)
-# s_agg2_0 → 0068 (104)
-# s_agg2_1 → 0069 (105)
-# s_agg3_0 → 006a (106)
-# s_agg3_1 → 006b (107)
-
-# s_edge0_0 → 00c8 (200)
-# s_edge0_1 → 00c9 (201)
-# s_edge1_0 → 00ca (202)
-# s_edge1_1 → 00cb (203)
-# s_edge2_0 → 00cc (204)
-# s_edge2_1 → 00cd (205)
-# s_edge3_0 → 00ce (206)
-# s_edge3_1 → 00cf (207)
-
-# ✅ That matches exactly with our intended numbering scheme (cores 1–4, aggs 100–107, edges 200–207).

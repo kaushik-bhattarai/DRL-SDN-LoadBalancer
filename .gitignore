@@ -1,7 +1,23 @@
-ryu.txt
-traffic_generator.py
-cmd.txt
-c.py
-rough.py
-ryu-venv/
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ryu-venv/
+.env
+
+# Project Specific
+logs/
+models/
+action_log.csv
+wget-log*
+*.log
+*.pcap
+
+# IDEs
+.vscode/
+.idea/
+

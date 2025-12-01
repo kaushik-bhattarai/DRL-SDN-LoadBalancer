@@ -1,169 +1,79 @@
-# 🧠 Deep Reinforcement Learning–Based Server Load Balancing (SDN + Ryu + Mininet)
+# DRL-SDN Load Balancer
 
-This project implements a **Server Load Balancing System** using **Software-Defined Networking (SDN)** with the **Ryu controller** and **Mininet** network emulator.
+A Deep Reinforcement Learning (DRL) based Load Balancer for Software Defined Networks (SDN) using Ryu and Mininet.
 
-The current phase includes:
-- ✅ Working **controller (Ryu)** with REST APIs
-- ✅ Working **Fat-Tree network topology** in Mininet
-- 🚧 Planned integration of **Deep Reinforcement Learning (DRL)** for dynamic load balancing
+## 🚀 Overview
+This project implements an intelligent load balancer that uses a Deep Q-Network (DQN) agent to dynamically route traffic across multiple servers in a Fat-Tree topology. The agent learns to minimize latency and server load variance by interacting with the SDN environment in real-time.
 
----
+## 🛠️ Prerequisites
+- **OS**: Linux (Ubuntu 20.04+ recommended)
+- **Python**: 3.8+
+- **Mininet**: Network emulator
+- **Ryu**: SDN Controller framework
+- **Open vSwitch**: Virtual switch
 
-## ⚙️ 1. Requirements
+## 📦 Installation
 
-Make sure the following are installed:
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/yourusername/drl-sdn-load-balancer.git
+   cd drl-sdn-load-balancer
+   ```
 
-### System packages
+2. **Create a virtual environment :**
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+## 🏃‍♂️ How to Run
+
+### 1. Start the Controller
+Open a terminal and run the Ryu controller:
 ```bash
-sudo apt update
-sudo apt install -y python3 python3-pip mininet openvswitch-switch
-```
-
-### Python dependencies
-```bash
-pip install ryu requests pyyaml numpy
-```
-
-### Optional (for DRL phase)
-```bash
-pip install torch gym
-```
-
-✅ **Tested on:** Ubuntu 20.04 / Linux Mint 21 with Python 3.8+
-
----
-
-## 📁 2. Project Structure
-
-```
-.
-├── controller.py           # Ryu controller (handles flows, ports, APIs)
-├── mininet_topology.py     # Fat-tree topology setup for Mininet
-├── trainer.py              # DRL training logic (under development)
-├── utils/
-│   └── metrics.py          # Host metric utilities (CPU, memory, RTT simulation)
-├── config.yaml             # DRL configuration parameters (optional)
-└── README.md               # Project documentation
-```
-
----
-
-## 🚀 3. How to Run the Project
-
-### Step 1. Start the Ryu Controller
-```bash
+# Ensure you are in the project root and venv is activated 
 ryu-manager ryu_controller.py
 ```
 
-You should see logs like:
-```
-Datapath 200 connected
-Datapath 201 connected
-Datapath 202 connected
-```
-
-### Step 2. Run the Fat-Tree Topology
-In a new terminal:
+### 2. Start Training
+Open a second terminal and run the training script:
 ```bash
-sudo python3 mininet_topology.py
+sudo ./venv/bin/python3 train.py
 ```
+This will:
+- Initialize the Mininet topology (Fat-Tree).
+- Connect to the Ryu controller.
+- Start the DRL agent training loop.
+- Generate traffic using `ab` (ApacheBench).
 
-### Step 3. Test Connectivity
-Once Mininet starts:
-```bash
-mininet> h1 ping -c1 h2
-```
+## 📂 Project Structure
+- `ryu_controller.py`: The SDN controller logic (ARP, VIP, DRL integration).
+- `train.py`: Main training script (Environment loop, Traffic generation).
+- `drl_agent.py`: Deep Q-Network agent implementation (PyTorch).
+- `mininet_topology.py`: Custom Fat-Tree topology definition.
+- `setup_network.py`: Helper script to configure static routes and flows.
+- `traffic_generator.py`: Wrapper for generating HTTP traffic.
+- `real_server_monitor.py`: Monitors server metrics (CPU, Latency).
 
-You should see destination host unreachable because it is yet to install the flow rules in the switch (having dpid:200).So for this we first install flow rules via REST API.
+## 📊 Features
+- **Dynamic Routing**: DRL agent selects optimal servers per flow.
+- **Real-time Monitoring**: Latency and Load tracking.
+- **Training Mode**: Disables session persistence for faster learning.
+- **VIP Handling**: Virtual IP (10.0.0.100) for transparent load balancing.
 
-Also once you created topology then it persits untill you killed with command :
-```bash
-sudo mn -c
-```
-And make sure you restart controller after that and run the topology again !!
+## 📝 Configuration
+Edit `config.yaml` to adjust:
+- Training parameters (Episodes, Batch size, Learning rate).
+- Reward function weights.
+- Traffic patterns.
 
----
+## 🤝 Contributing
+Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 
-## 🌐 4. Verify Controller API Endpoints
-
-**Base URL:** `http://127.0.0.1:8080/sdrlb`
-
-### Examples
-
-| Endpoint | Description | Example |
-|----------|-------------|---------|
-| `/stats/port/<dpid>` | Get port statistics | `curl http://127.0.0.1:8080/sdrlb/stats/port/200` |
-| `/stats/flow/<dpid>` | Get flow statistics | `curl http://127.0.0.1:8080/sdrlb/stats/flow/200` |
-| `/host_ports/<dpid>` | Get host-port mappings | `curl http://127.0.0.1:8080/sdrlb/host_ports/200` |
-| `/stats/flowentry/add` | Add flow manually | see below |
-
-### Example: Add Flow via REST
-This code can be seen in `add_flows.sh ` and on its execution it sucessfully installed the flow rule in switch dpid:200 which is also connected with hosts `h1` and `h2 ` amd make it pingable between them.
-```bash
-#!/bin/bash
-
-RYU_URL="http://127.0.0.1:8080/sdrlb/stats/flowentry/add"
-DPID=200
-
-# h1 → h2 (IP)
-curl -s -X POST -H "Content-Type: application/json" \
--d '{"dpid":'"$DPID"',"match":{"in_port":3,"eth_type":2048},"actions":[{"type":"OUTPUT","port":4}],"priority":1000,"idle_timeout":60}' \
-$RYU_URL
-
-# h2 → h1 (IP)
-curl -s -X POST -H "Content-Type: application/json" \
--d '{"dpid":'"$DPID"',"match":{"in_port":4,"eth_type":2048},"actions":[{"type":"OUTPUT","port":3}],"priority":1000,"idle_timeout":60}' \
-$RYU_URL
-
-# h1 → h2 (ARP)
-curl -s -X POST -H "Content-Type: application/json" \
--d '{"dpid":'"$DPID"',"match":{"in_port":3,"eth_type":2054},"actions":[{"type":"OUTPUT","port":4}],"priority":1000,"idle_timeout":60}' \
-$RYU_URL
-
-# h2 → h1 (ARP)
-curl -s -X POST -H "Content-Type: application/json" \
--d '{"dpid":'"$DPID"',"match":{"in_port":4,"eth_type":2054},"actions":[{"type":"OUTPUT","port":3}],"priority":1000,"idle_timeout":60}' \
-$RYU_URL
-
-echo "✅ All 4 flows (IP+ARP) installed for h1 <-> h2"
-
-```
-On successfull flow installation now try again:
-```bash
-mininet> h1 ping -c1 h2
-```
-It should works!!
-But
-#### Why IP + ARP Flows are Necessary??
-ARP: needed so hosts can resolve each other’s MAC address. Without it, they never get past “who has 10.0.0.x?” stage.
-
-IP : needed to forward actual ICMP (ping) packets once ARP resolves.
-
-If you only install ARP flows, hosts can learn MACs, but no IP packets will ever be forwarded → host unreachable.
-If you only install IP flows, ARP won’t work, so the MAC never resolves → same failure.
-
-That’s why we need both
-
-## 🧠 5. DRL Training (Future Phase)
-
-`trainer.py` will later handle:
-- Collecting network and host metrics
-- Generating synthetic traffic
-- Training a DQN Agent for adaptive load balancing
-
-**Currently:**
-- `controller.py` and `mininet_topology.py` are tested and working
-- DRL logic (`trainer.py`) is a skeleton ready for integration
-
----
-
-## ✅ 6. Expected Behavior
-
-- Controller and topology start without errors
-- Switches connect successfully to Ryu
-- Host-to-host ping succeeds
-- REST API endpoints return valid JSON responses
-- Manual flow installation via REST API works correctly
-
----
-
+## 📄 License
+[MIT](https://choosealicense.com/licenses/mit/)
