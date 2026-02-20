@@ -2,22 +2,22 @@
 
 A Deep Reinforcement Learning (DRL) based Load Balancer for Software Defined Networks (SDN) using Ryu and Mininet.
 
-## 🚀 Overview
+##  Overview
 This project implements an intelligent load balancer that uses a Deep Q-Network (DQN) agent to dynamically route traffic across multiple servers in a Fat-Tree topology. The agent learns to minimize latency and server load variance by interacting with the SDN environment in real-time.
 
-## 🛠️ Prerequisites
+##  Prerequisites
 - **OS**: Linux (Ubuntu 20.04+ recommended)
 - **Python**: 3.8+
 - **Mininet**: Network emulator
 - **Ryu**: SDN Controller framework
 - **Open vSwitch**: Virtual switch
 
-## 📦 Installation
+##  Installation
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/drl-sdn-load-balancer.git
-   cd drl-sdn-load-balancer
+   git clone https://github.com/kaushik-bhattarai/DRL-SDN-Load-Balancer.git
+   cd DRL-SDN-Load-Balancer
    ```
 
 2. **Create a virtual environment :**
@@ -31,7 +31,7 @@ This project implements an intelligent load balancer that uses a Deep Q-Network 
    pip install -r requirements.txt
    ```
 
-## 🏃‍♂️ How to Run
+##  How to Run
 
 ### 1. Start the Controller
 Open a terminal and run the Ryu controller:
@@ -60,19 +60,19 @@ This will:
 - `traffic_generator.py`: Wrapper for generating HTTP traffic.
 - `real_server_monitor.py`: Monitors server metrics (CPU, Latency).
 
-## 📊 Features
+##  Features
 - **Dynamic Routing**: DRL agent selects optimal servers per flow.
 - **Real-time Monitoring**: Latency and Load tracking.
 - **Training Mode**: Disables session persistence for faster learning.
 - **VIP Handling**: Virtual IP (10.0.0.100) for transparent load balancing.
 
-## 📝 Configuration
+##  Configuration
 Edit `config.yaml` to adjust:
 - Training parameters (Episodes, Batch size, Learning rate).
 - Reward function weights.
 - Traffic patterns.
 
-## 🤝 Contributing
+##  Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 
 ## 📄 License

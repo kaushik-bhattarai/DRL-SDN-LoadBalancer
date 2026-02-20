@@ -135,7 +135,7 @@ class TrafficGenerator:
         for host_name in server_hosts:
             host = self.net.get(host_name)
             if host is None:
-                print(f"  ❌ {host_name}: Host not found!")
+                print(f"   {host_name}: Host not found!")
                 continue
             
             # Start a simple Python HTTP server on port 8000
@@ -155,9 +155,9 @@ class TrafficGenerator:
             # Ping with short timeout
             result = client.cmd(f'ping -c 1 -W 1 {host.IP()}')
             if "1 received" in result:
-                print(f"  ✅ Ping {client.name} -> {host_name} ({host.IP()}): OK")
+                print(f"   Ping {client.name} -> {host_name} ({host.IP()}): OK")
             else:
-                print(f"  ❌ Ping {client.name} -> {host_name} ({host.IP()}): FAILED")
+                print(f"   Ping {client.name} -> {host_name} ({host.IP()}): FAILED")
                 print(f"     Output: {result}")
         print("\n")
     

@@ -493,9 +493,9 @@ def test_real_monitoring():
         host = net.get(host_name)
         local_test = host.cmd('curl -s -m 2 http://127.0.0.1/')
         if host_name in local_test:
-            print(f"  ✅ {host_name}: Localhost test OK")
+            print(f"   {host_name}: Localhost test OK")
         else:
-            print(f"  ❌ {host_name}: Localhost test FAILED")
+            print(f"   {host_name}: Localhost test FAILED")
             # Check the log
             log = host.cmd(f'cat /tmp/{host_name}.log')
             print(f"     Log: {log[:100]}")
@@ -523,10 +523,10 @@ def test_real_monitoring():
         result = client.cmd(f'curl -s -m 2 http://{ip}/ 2>&1')
         
         if server_name in result:
-            print(f"  ✅ {client_name} → {server_name} ({ip}): OK - Got: {result[:50]}")
+            print(f"   {client_name} → {server_name} ({ip}): OK - Got: {result[:50]}")
             all_working = all_working and True
         else:
-            print(f"  ❌ {client_name} → {server_name} ({ip}): FAILED")
+            print(f"  {client_name} → {server_name} ({ip}): FAILED")
             print(f"     curl output: {result[:150]}")
             all_working = False
     
@@ -538,29 +538,29 @@ def test_real_monitoring():
     result = client.cmd(f'curl -s -m 2 http://{ip}/ 2>&1')
     
     if server_name in result:
-        print(f"  ✅ {client_name} → {server_name} ({ip}): OK - Got: {result[:50]}")
+        print(f"   {client_name} → {server_name} ({ip}): OK - Got: {result[:50]}")
     else:
-        print(f"  ❌ {client_name} → {server_name} ({ip}): FAILED")
+        print(f"   {client_name} → {server_name} ({ip}): FAILED")
         print(f"     curl output: {result[:150]}")
         all_working = False
     
     if not all_working:
-        print("\n⚠️  Some servers not responding. Debugging...")
+        print("\n  Some servers not responding. Debugging...")
         # Check if process is running
         for host_name in ['h1', 'h2', 'h3']:
             host = net.get(host_name)
             ps_result = host.cmd('ps aux | grep "http.server" | grep -v grep')
             if ps_result.strip():
-                print(f"  {host_name}: Process running ✅")
+                print(f"  {host_name}: Process running ")
             else:
-                print(f"  {host_name}: Process NOT running ❌")
+                print(f"  {host_name}: Process NOT running ")
             
             # Check if listening on port 80
             port_check = host.cmd('netstat -tuln | grep :80')
             if port_check.strip():
-                print(f"  {host_name}: Port 80 listening ✅")
+                print(f"  {host_name}: Port 80 listening ")
             else:
-                print(f"  {host_name}: Port 80 NOT listening ❌")
+                print(f"  {host_name}: Port 80 NOT listening ")
         
         # Check connectivity from h4
         print("\n  Testing connectivity from h4:")
@@ -572,16 +572,16 @@ def test_real_monitoring():
             # Ping test
             ping_result = h4.cmd(f'ping -c 1 -W 1 {ip}')
             if '1 received' in ping_result:
-                print(f"  {host_name} ({ip}): Ping OK ✅")
+                print(f"  {host_name} ({ip}): Ping OK ")
             else:
-                print(f"  {host_name} ({ip}): Ping FAILED ❌")
+                print(f"  {host_name} ({ip}): Ping FAILED ")
             
             # Real TCP test with nc (netcat)
             tcp_test = h4.cmd(f'nc -zv -w 2 {ip} 80 2>&1')
             if 'succeeded' in tcp_test or 'open' in tcp_test:
-                print(f"  {host_name} ({ip}): TCP port 80 open ✅")
+                print(f"  {host_name} ({ip}): TCP port 80 open ")
             else:
-                print(f"  {host_name} ({ip}): TCP port 80 closed/filtered ❌")
+                print(f"  {host_name} ({ip}): TCP port 80 closed/filtered ")
                 print(f"     nc output: {tcp_test[:80]}")
             
             # Try telnet as well

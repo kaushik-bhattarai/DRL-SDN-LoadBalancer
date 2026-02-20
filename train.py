@@ -163,7 +163,7 @@ class RealLoadBalancerTrainer:
                     self._sync_failures = 0
                 self._sync_failures += 1
                 if self._sync_failures == 1 or self._sync_failures % 10 == 0:
-                    print(f"⚠️  Weight sync failed: {resp.status_code} (failure #{self._sync_failures})")
+                    print(f"  Weight sync failed: {resp.status_code} (failure #{self._sync_failures})")
                 return False
                 
         except Exception as e:
@@ -172,7 +172,7 @@ class RealLoadBalancerTrainer:
                 self._sync_failures = 0
             self._sync_failures += 1
             if self._sync_failures == 1 or self._sync_failures % 10 == 0:
-                print(f"⚠️  Weight sync error: {e} (failure #{self._sync_failures})")
+                print(f"  Weight sync error: {e} (failure #{self._sync_failures})")
             return False
     
     def setup_network(self):
@@ -206,7 +206,7 @@ class RealLoadBalancerTrainer:
                     time.sleep(2)
         
         if not ryu_switches:
-            print("[WARN] ⚠️  Could not query Ryu switches, but continuing anyway...")
+            print("[WARN]   Could not query Ryu switches, but continuing anyway...")
         
         # Install routing flows
         print("[SETUP] Installing routing flows...")
@@ -219,11 +219,11 @@ class RealLoadBalancerTrainer:
         h3 = self.net.get('h3')
         result = h1.cmd(f'ping -c 3 -W 1 {h3.IP()}')
         if "0% packet loss" in result:
-            print("[SETUP] ✅ Connectivity verified!")
+            print("[SETUP]  Connectivity verified!")
         else:
-            print(f"[SETUP] ❌ Connectivity check failed:\n{result}")
+            print(f"[SETUP]  Connectivity check failed:\n{result}")
             # Don't abort, but warn loudly
-            print("⚠️  WARNING: Multi-hop routing might be broken!")
+            print("  WARNING: Multi-hop routing might be broken!")
     
     def setup_monitor(self):
         """Start monitoring (Servers are already started by TrafficGenerator)"""
@@ -238,7 +238,7 @@ class RealLoadBalancerTrainer:
         # Set the global monitor in metrics module
         metrics_module.set_server_monitor(self.server_monitor)
         
-        print("[SETUP] ✅ Real server monitoring active!\n")
+        print("[SETUP]  Real server monitoring active!\n")
     
     def setup_traffic_generator(self):
         """Initialize traffic generator"""
@@ -264,13 +264,13 @@ class RealLoadBalancerTrainer:
                 timeout=2.0
             )
             if resp.status_code == 200:
-                print("[SETUP] ✅ Controller training mode ENABLED (session persistence disabled)")
+                print("[SETUP]  Controller training mode ENABLED (session persistence disabled)")
             else:
-                print(f"[SETUP] ⚠️  Failed to enable training mode: {resp.status_code}")
+                print(f"[SETUP]   Failed to enable training mode: {resp.status_code}")
         except Exception as e:
-            print(f"[SETUP] ⚠️  Could not enable training mode: {e}")
+            print(f"[SETUP]   Could not enable training mode: {e}")
         
-        print("[SETUP] ✅ DRL agent ready\n")
+        print("[SETUP]  DRL agent ready\n")
     
     def generate_traffic_thread(self, pattern, duration):
         """Run traffic generation in background"""
@@ -355,9 +355,9 @@ class RealLoadBalancerTrainer:
         # Initial weight sync to bootstrap controller's agent
         print("[TRAIN] Syncing initial weights to controller...")
         if self.sync_weights_to_controller():
-            print("[TRAIN] ✅ Controller initialized with trainer's weights")
+            print("[TRAIN]  Controller initialized with trainer's weights")
         else:
-            print("[TRAIN] ⚠️  Initial weight sync failed, controller will initialize on first sync")
+            print("[TRAIN]   Initial weight sync failed, controller will initialize on first sync")
         
         start_time = time.time()
         total_reward = 0.0
@@ -510,10 +510,10 @@ class RealLoadBalancerTrainer:
                 # Save checkpoint every 10 episodes
                 if (ep + 1) % 10 == 0:
                     self.save_checkpoint(ep + 1)
-                    print(f"✅ Checkpoint saved: episode {ep+1}\n")
+                    print(f" Checkpoint saved: episode {ep+1}\n")
             
         except KeyboardInterrupt:
-            print('\n⚠️  Training interrupted by user')
+            print('\n  Training interrupted by user')
         
         finally:
             self.training_active = False
@@ -544,7 +544,7 @@ class RealLoadBalancerTrainer:
             json.dump(stats, f, indent=2)
         
         print(f"\n{'='*70}")
-        print("✅ TRAINING COMPLETED!")
+        print(" TRAINING COMPLETED!")
         print(f"{'='*70}")
         print(f"Final model: models/final/dqn_final.pth")
         print(f"Statistics: logs/training_with_real_load.json")
@@ -610,10 +610,10 @@ def main():
     print("\n[CHECK] Verifying Ryu controller...")
     try:
         response = requests.get(f'{RYU_URL}/ports/200', timeout=2)
-        print("✅ Ryu controller is running\n")
+        print(" Ryu controller is running\n")
     except:
         print("\n" + "="*70)
-        print("❌ ERROR: Ryu controller not detected!")
+        print(" ERROR: Ryu controller not detected!")
         print("="*70)
         print("\nPlease start the Ryu controller first:")
         print("  Terminal 1: ryu-manager ryu_controller.py")
@@ -625,7 +625,7 @@ def main():
     # Check if running as root (needed for Mininet)
     if os.geteuid() != 0:
         print("\n" + "="*70)
-        print("❌ ERROR: This script requires root privileges (for Mininet)")
+        print(" ERROR: This script requires root privileges (for Mininet)")
         print("="*70)
         print("\nPlease run with sudo:")
         print("  sudo python3 trainer_with_real_monitoring.py")
@@ -636,11 +636,11 @@ def main():
     print("🚀 REAL SERVER LOAD BALANCING TRAINING")
     print("="*70)
     print("\nThis training uses:")
-    print("  ✅ Real HTTP servers (h1, h2, h3)")
-    print("  ✅ Real traffic generation")
-    print("  ✅ Real CPU/memory measurement")
-    print("  ✅ Real latency measurement")
-    print("  ✅ DRL agent learns from ACTUAL load!")
+    print("   Real HTTP servers (h1, h2, h3)")
+    print("   Real traffic generation")
+    print("   Real CPU/memory measurement")
+    print("   Real latency measurement")
+    print("   DRL agent learns from ACTUAL load!")
     print("\n" + "="*70 + "\n")
     
     # Run training

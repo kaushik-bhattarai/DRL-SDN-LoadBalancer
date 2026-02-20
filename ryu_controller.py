@@ -24,7 +24,7 @@ import json
 from webob import Response
 
 print("\n\n" + "="*80)
-print("🚀 STARTING NEW CONTROLLER (SDNRestController)")
+print(" STARTING NEW CONTROLLER (SDNRestController)")
 print("="*80 + "\n\n")
 
 BASE_URL = '/sdrlb'
@@ -73,7 +73,7 @@ class SDNRest(app_manager.RyuApp):
             '10.0.0.2': {'mac': '00:00:00:00:00:02', 'port': 4, 'switch': 200},
             '10.0.0.3': {'mac': '00:00:00:00:00:03', 'port': 3, 'switch': 201}
         }
-        self.logger.info(f"✅ Pre-populated server pool: {list(self.server_pool.keys())}")
+        self.logger.info(f" Pre-populated server pool: {list(self.server_pool.keys())}")
         
         # DRL Agent
         self.drl_agent = None
@@ -161,7 +161,7 @@ class SDNRest(app_manager.RyuApp):
         )
         datapath.send_msg(out)
         
-        self.logger.info(f"✅ ARP REPLY sent: VIP is at {self.VIRTUAL_MAC}")
+        self.logger.info(f" ARP REPLY sent: VIP is at {self.VIRTUAL_MAC}")
         self.logger.info("="*70 + "\n")
 
     # ========================================
@@ -171,12 +171,12 @@ class SDNRest(app_manager.RyuApp):
     def set_drl_agent(self, agent):
         """Set DRL agent"""
         self.drl_agent = agent
-        self.logger.info("✅ DRL Agent registered")
+        self.logger.info(" DRL Agent registered")
     
     def set_server_monitor(self, monitor):
         """Set server monitor"""
         self.server_monitor = monitor
-        self.logger.info("✅ Server Monitor registered")
+        self.logger.info(" Server Monitor registered")
     
     def select_server_with_drl(self, client_ip, dpid):
         """Use DRL agent to select server"""
@@ -219,7 +219,7 @@ class SDNRest(app_manager.RyuApp):
             return selected_ip, self.server_pool[selected_ip]
             
         except Exception as e:
-            self.logger.error(f"❌ DRL error: {e}")
+            self.logger.error(f" DRL error: {e}")
             selected_ip = list(self.server_pool.keys())[0]
             return selected_ip, self.server_pool[selected_ip]
     
@@ -300,7 +300,7 @@ class SDNRest(app_manager.RyuApp):
         session_key = (client_ip, client_port)
         
         self.logger.info("="*70)
-        self.logger.info(f"🎯 VIP REQUEST DETECTED")
+        self.logger.info(f" VIP REQUEST DETECTED")
         self.logger.info("="*70)
         self.logger.info(f"Client: {client_ip}:{client_port}")
         self.logger.info(f"VIP: {self.VIRTUAL_IP}:{dst_port}")
@@ -309,7 +309,7 @@ class SDNRest(app_manager.RyuApp):
         # Session persistence (disabled during training)
         if not self.training_mode and session_key in self.vip_sessions:
             selected_server_ip = self.vip_sessions[session_key]
-            self.logger.info(f"📌 Existing session → {selected_server_ip}")
+            self.logger.info(f" Existing session → {selected_server_ip}")
         else:
             selected_server_ip, server_info = self.select_server_with_drl(client_ip, dpid)
             
@@ -329,7 +329,7 @@ class SDNRest(app_manager.RyuApp):
         server_switch = server_info['switch']
         server_port = server_info['port']
         
-        self.logger.info(f"📍 Target: {selected_server_ip} (Switch {server_switch}, Port {server_port})")
+        self.logger.info(f" Target: {selected_server_ip} (Switch {server_switch}, Port {server_port})")
         
         # ========================================
         # INSTALL DNAT FLOWS
@@ -348,9 +348,9 @@ class SDNRest(app_manager.RyuApp):
             # On remote switch (Ingress): Send to Uplink (Port 1)
             # This converts VIP -> Physical IP, then standard routing takes over!
             out_port = 1
-            self.logger.info(f"🚀 Remote switching: DNAT + Uplink (Port 1)")
+            self.logger.info(f" Remote switching: DNAT + Uplink (Port 1)")
 
-        self.logger.info(f"�💾 Installing DNAT on switch {dpid}")
+        self.logger.info(f"� Installing DNAT on switch {dpid}")
         
         # Forward flow: Client → VIP becomes Client → Server
         match_kwargs = {
@@ -382,7 +382,7 @@ class SDNRest(app_manager.RyuApp):
         
         # PRIORITY 4000: Higher than basic routing (2000)
         self.add_flow(datapath, 4000, match, actions, idle_timeout=flow_timeout, hard_timeout=flow_timeout*2)
-        self.logger.info(f"  ✅ Forward: {client_ip} → VIP ⇒ {selected_server_ip} (Port {out_port}, timeout={flow_timeout}s)")
+        self.logger.info(f"   Forward: {client_ip} → VIP ⇒ {selected_server_ip} (Port {out_port}, timeout={flow_timeout}s)")
         
         # Reverse flow: Server → Client becomes VIP → Client
         # Note: Reverse flow is only needed on the LAST hop (Server Switch) 
@@ -422,7 +422,7 @@ class SDNRest(app_manager.RyuApp):
         # PRIORITY 4000: Higher than basic routing (2000)
         # Use same timeout as forward flow (10s during training)
         self.add_flow(datapath, 4000, reverse_match, reverse_actions, idle_timeout=flow_timeout, hard_timeout=flow_timeout*2)
-        self.logger.info(f"  ✅ Reverse: {selected_server_ip} → {client_ip} ⇒ VIP")
+        self.logger.info(f"   Reverse: {selected_server_ip} → {client_ip} ⇒ VIP")
         
         # Forward this packet immediately
         out = parser.OFPPacketOut(
@@ -433,7 +433,7 @@ class SDNRest(app_manager.RyuApp):
             data=msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
         )
         datapath.send_msg(out)
-        self.logger.info(f"📤 Packet forwarded")
+        self.logger.info(f" Packet forwarded")
         
         self.logger.info("="*70 + "\n")
 
@@ -468,7 +468,7 @@ class SDNRest(app_manager.RyuApp):
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
         
-        self.logger.info(f"✅ Table-miss flow installed on datapath {datapath.id}")
+        self.logger.info(f" Table-miss flow installed on datapath {datapath.id}")
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None, 
                  idle_timeout=0, hard_timeout=0):
@@ -558,7 +558,7 @@ class SDNRest(app_manager.RyuApp):
         dst = eth.dst
         src = eth.src
 
-        self.logger.info(f"📦 PacketIn: dpid={dpid}, src={src}, dst={dst}, type={hex(eth.ethertype)}")
+        self.logger.info(f" PacketIn: dpid={dpid}, src={src}, dst={dst}, type={hex(eth.ethertype)}")
         if eth.ethertype == 2048: # IPv4
             ip = pkt.get_protocol(ipv4.ipv4)
             self.logger.info(f"   IPv4: src={ip.src}, dst={ip.dst}")
@@ -661,9 +661,9 @@ class SDNRestController(ControllerBase):
             # Clear existing sessions when enabling training mode
             if enabled:
                 _app_instance.vip_sessions.clear()
-                _app_instance.logger.info("🎯 Training mode ENABLED - session persistence disabled")
+                _app_instance.logger.info(" Training mode ENABLED - session persistence disabled")
             else:
-                _app_instance.logger.info("🎯 Training mode DISABLED - session persistence enabled")
+                _app_instance.logger.info(" Training mode DISABLED - session persistence enabled")
             
             return Response(status=200, body=json.dumps({
                 'training_mode': enabled,
@@ -706,7 +706,7 @@ class SDNRestController(ControllerBase):
                     config = yaml.safe_load(f)
                 
                 _app_instance.drl_agent = DQNAgent(config)
-                _app_instance.logger.info("✅ Controller DRL agent created")
+                _app_instance.logger.info(" Controller DRL agent created")
             
             # Decode and load weights
             import base64
@@ -721,10 +721,10 @@ class SDNRestController(ControllerBase):
                 target_net_weights = torch.load(io.BytesIO(target_net_bytes))
                 _app_instance.drl_agent.target_net.load_state_dict(target_net_weights)
             
-            _app_instance.logger.info("✅ Controller weights updated from trainer")
+            _app_instance.logger.info(" Controller weights updated from trainer")
             return Response(status=200, body=json.dumps({'status': 'weights_updated'}).encode('utf-8'))
         except Exception as e:
-            _app_instance.logger.error(f"❌ Weight update failed: {e}")
+            _app_instance.logger.error(f" Weight update failed: {e}")
             return Response(status=500, body=json.dumps({'error': str(e)}).encode('utf-8'))
 
     @route('sdn', BASE_URL + '/stats/flow/{dpid}', methods=['GET'])

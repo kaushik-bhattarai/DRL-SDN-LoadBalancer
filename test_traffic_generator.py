@@ -34,9 +34,9 @@ client_names = set([h.name for h in traffic_gen.clients])
 overlap = server_names & client_names
 
 if overlap:
-    print(f"  ❌ ERROR: Overlap found: {overlap}")
+    print(f"   ERROR: Overlap found: {overlap}")
 else:
-    print(f"  ✅ No overlap - servers and clients are separate!")
+    print(f"   No overlap - servers and clients are separate!")
 
 # Start servers
 print("\n[4] Starting HTTP servers...")
@@ -48,9 +48,9 @@ for server_name in traffic_gen.server_hosts:
     server = net.get(server_name)
     result = server.cmd('curl -s -m 1 http://127.0.0.1/')
     if server_name in result:
-        print(f"  ✅ {server_name}: Responding")
+        print(f"   {server_name}: Responding")
     else:
-        print(f"  ❌ {server_name}: Not responding")
+        print(f"   {server_name}: Not responding")
 
 # Test client can reach server (use same-switch pairs)
 print("\n[6] Testing client → server connectivity:")
@@ -62,9 +62,9 @@ client_h2 = net.get('h2')
 server_h1 = net.get('h1')
 result = client_h2.cmd(f'curl -s -m 2 http://{server_h1.IP()}/')
 if 'h1' in result:
-    print(f"  ✅ h2 → h1 (same switch): OK")
+    print(f"   h2 → h1 (same switch): OK")
 else:
-    print(f"  ❌ h2 → h1 (same switch): Failed")
+    print(f"   h2 → h1 (same switch): Failed")
 
 # h3, h4 are on switch 201
 # Test with h4 → h3 (same switch)
@@ -72,17 +72,17 @@ client_h4 = net.get('h4')
 server_h3 = net.get('h3')
 result = client_h4.cmd(f'curl -s -m 2 http://{server_h3.IP()}/')
 if 'h3' in result:
-    print(f"  ✅ h4 → h3 (same switch): OK")
+    print(f"   h4 → h3 (same switch): OK")
 else:
-    print(f"  ❌ h4 → h3 (same switch): Failed")
+    print(f"   h4 → h3 (same switch): Failed")
 
 print("\n  Testing cross-switch (will likely fail):")
 # h4 (switch 201) → h1 (switch 200)
 result = client_h4.cmd(f'curl -s -m 2 http://{server_h1.IP()}/')
 if 'h1' in result:
-    print(f"  ✅ h4 → h1 (cross-switch): OK")
+    print(f"   h4 → h1 (cross-switch): OK")
 else:
-    print(f"  ❌ h4 → h1 (cross-switch): Failed (expected)")
+    print(f"   h4 → h1 (cross-switch): Failed (expected)")
 
 # Quick traffic test - use SAME-SWITCH pairs
 print("\n[7] Running quick traffic test (5 seconds)...")
@@ -124,5 +124,5 @@ traffic_gen.stop()
 net.stop()
 
 print("\n" + "="*60)
-print("✅ Test completed!")
+print(" Test completed!")
 print("="*60 + "\n")

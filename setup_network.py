@@ -86,10 +86,10 @@ def install_flow(dpid, match, actions, priority=100):
         if response.status_code == 200:
             return True
         else:
-            print(f"    ⚠️  Failed on switch {dpid}: {response.text[:50]}")
+            print(f"      Failed on switch {dpid}: {response.text[:50]}")
             return False
     except Exception as e:
-        print(f"    ❌ Error on switch {dpid}: {str(e)[:50]}")
+        print(f"     Error on switch {dpid}: {str(e)[:50]}")
         return False
 
 def setup_complete_routing():
@@ -109,7 +109,7 @@ def setup_complete_routing():
         server_switch = server_info['switch']
         server_port = server_info['port']
         
-        print(f"📍 Setting up routes to {server_ip} (Server on switch {server_switch})")
+        print(f" Setting up routes to {server_ip} (Server on switch {server_switch})")
         
         # ========================================
         # STEP 1: Server's own switch - Direct delivery (IP + ARP)
@@ -120,7 +120,7 @@ def setup_complete_routing():
         actions = [{"type": "OUTPUT", "port": server_port}]
         
         if install_flow(server_switch, match, actions, priority=2000):
-            print(f"  ✅ Switch {server_switch}: Direct to server IP (port {server_port})")
+            print(f"   Switch {server_switch}: Direct to server IP (port {server_port})")
             total_flows += 1
         
         # ARP to server
@@ -128,7 +128,7 @@ def setup_complete_routing():
         actions = [{"type": "OUTPUT", "port": server_port}]
         
         if install_flow(server_switch, match_arp, actions, priority=2000):
-            print(f"  ✅ Switch {server_switch}: Direct to server ARP (port {server_port})")
+            print(f"   Switch {server_switch}: Direct to server ARP (port {server_port})")
             total_flows += 1
         
         # REVERSE: From server back to clients on same switch
@@ -167,13 +167,13 @@ def setup_complete_routing():
                 if install_flow(server_switch, match_arp, actions, priority=1800):
                     total_flows += 1
         
-        print(f"  ✅ Switch {server_switch}: Return paths to all hosts configured")
+        print(f"   Switch {server_switch}: Return paths to all hosts configured")
         
         # Return traffic to uplink (for clients on other switches) - GENERIC FALLBACK
         match = {"eth_type": 2048, "in_port": server_port}
         actions = [{"type": "OUTPUT", "port": 1}]  # Send to uplink
         if install_flow(server_switch, match, actions, priority=1500):
-            print(f"  ✅ Switch {server_switch}: Return traffic from server to uplink")
+            print(f"   Switch {server_switch}: Return traffic from server to uplink")
             total_flows += 1
         
         # ========================================
@@ -188,14 +188,14 @@ def setup_complete_routing():
             actions = [{"type": "OUTPUT", "port": 1}]
             
             if install_flow(edge_switch, match, actions, priority=500):
-                print(f"  ✅ Edge {edge_switch}: Send IP to agg (port 1)")
+                print(f"   Edge {edge_switch}: Send IP to agg (port 1)")
                 total_flows += 1
             
             match_arp = {"eth_type": 2054, "arp_tpa": server_ip}
             actions = [{"type": "OUTPUT", "port": 1}]
             
             if install_flow(edge_switch, match_arp, actions, priority=500):
-                print(f"  ✅ Edge {edge_switch}: Send ARP to agg (port 1)")
+                print(f"   Edge {edge_switch}: Send ARP to agg (port 1)")
                 total_flows += 1
             
             # REVERSE: From uplink to hosts on this switch
@@ -225,14 +225,14 @@ def setup_complete_routing():
                 actions = [{"type": "OUTPUT", "port": out_port}]
                 
                 if install_flow(agg_switch, match, actions, priority=1500):
-                    print(f"  ✅ Agg {agg_switch}: Route IP to edge {server_switch} (port {out_port})")
+                    print(f"   Agg {agg_switch}: Route IP to edge {server_switch} (port {out_port})")
                     total_flows += 1
                 
                 match_arp = {"eth_type": 2054, "arp_tpa": server_ip}
                 actions = [{"type": "OUTPUT", "port": out_port}]
                 
                 if install_flow(agg_switch, match_arp, actions, priority=1500):
-                    print(f"  ✅ Agg {agg_switch}: Route ARP to edge {server_switch} (port {out_port})")
+                    print(f"   Agg {agg_switch}: Route ARP to edge {server_switch} (port {out_port})")
                     total_flows += 1
                 
                 # Return path for hosts in THIS agg's edges (same pod)
@@ -292,14 +292,14 @@ def setup_complete_routing():
                 actions = [{"type": "OUTPUT", "port": 1}] # Default to port 1
                 
                 if install_flow(agg_switch, match, actions, priority=1500):
-                    print(f"  ✅ Agg {agg_switch}: Send IP to core (port 1)")
+                    print(f"   Agg {agg_switch}: Send IP to core (port 1)")
                     total_flows += 1
                 
                 match_arp = {"eth_type": 2054, "arp_tpa": server_ip}
                 actions = [{"type": "OUTPUT", "port": 1}]
                 
                 if install_flow(agg_switch, match_arp, actions, priority=1500):
-                    print(f"  ✅ Agg {agg_switch}: Send ARP to core (port 1)")
+                    print(f"   Agg {agg_switch}: Send ARP to core (port 1)")
                     total_flows += 1
                 
                 # Return path for hosts connected to THIS agg (send down to edges)
@@ -333,14 +333,14 @@ def setup_complete_routing():
                     actions = [{"type": "OUTPUT", "port": out_port}]
                     
                     if install_flow(core_switch, match, actions, priority=500):
-                        print(f"  ✅ Core {core_switch}: Route IP to agg {server_agg} (port {out_port})")
+                        print(f"   Core {core_switch}: Route IP to agg {server_agg} (port {out_port})")
                         total_flows += 1
                     
                     match_arp = {"eth_type": 2054, "arp_tpa": server_ip}
                     actions = [{"type": "OUTPUT", "port": out_port}]
                     
                     if install_flow(core_switch, match_arp, actions, priority=500):
-                        print(f"  ✅ Core {core_switch}: Route ARP to agg {server_agg} (port {out_port})")
+                        print(f"   Core {core_switch}: Route ARP to agg {server_agg} (port {out_port})")
                         total_flows += 1
             
             # REVERSE: Route return traffic from server's agg to other aggs
@@ -367,7 +367,7 @@ def setup_complete_routing():
         # ========================================
         # STEP 5: VIP ARP Handling (Force to Controller)
         # ========================================
-        print("📍 Setting up VIP ARP rules (Force to Controller)")
+        print(" Setting up VIP ARP rules (Force to Controller)")
         for edge_switch in EDGE_SWITCHES:
             # Match ARP for VIP (10.0.0.100)
             match_vip_arp = {"eth_type": 2054, "arp_tpa": "10.0.0.100"}
@@ -375,11 +375,11 @@ def setup_complete_routing():
             actions = [{"type": "OUTPUT", "port": 4294967293}]
             
             if install_flow(edge_switch, match_vip_arp, actions, priority=5000):
-                print(f"  ✅ Edge {edge_switch}: Force VIP ARP to Controller")
+                print(f"   Edge {edge_switch}: Force VIP ARP to Controller")
                 total_flows += 1
     
     print("="*70)
-    print(f"✅ Routing setup complete! Installed {total_flows} flows")
+    print(f" Routing setup complete! Installed {total_flows} flows")
     print("="*70)
     
     return total_flows > 0
@@ -421,16 +421,16 @@ def test_connectivity(net=None):
             result = client.cmd(f'ping -c 1 -W 1 {server_ip}')
             
             if '1 received' in result:
-                # print(f"  ✅ {client_name} → {server_ip}")
+                # print(f"   {client_name} → {server_ip}")
                 success_count += 1
                 sys.stdout.write('.')
             else:
-                print(f"\n  ❌ FAIL: {client_name} → {server_ip}")
+                print(f"\n   FAIL: {client_name} → {server_ip}")
                 sys.stdout.write('X')
             sys.stdout.flush()
             
     print(f"\n\n{'='*70}")
-    print(f"📊 Results: {success_count}/{total_tests} tests passed ({success_count/total_tests*100:.0f}%)")
+    print(f"Results: {success_count}/{total_tests} tests passed ({success_count/total_tests*100:.0f}%)")
     print(f"{'='*70}\n")
     
     if should_stop:
@@ -445,7 +445,7 @@ def main():
     
     # Check if we should run in test mode
     if len(sys.argv) > 1 and sys.argv[1] == '--test':
-        print("\n🧪 TEST MODE: Will start network, install flows, and test\n")
+        print("\n TEST MODE: Will start network, install flows, and test\n")
         
         from mininet_topology import start_network
         
@@ -455,7 +455,7 @@ def main():
         
         print("\n[2] Installing routing flows...")
         if not setup_complete_routing():
-            print("\n❌ Failed to install flows!")
+            print("\n Failed to install flows!")
             net.stop()
             return
         
@@ -465,26 +465,26 @@ def main():
         success = test_connectivity(net)
         
         if success:
-            print("✅✅✅ SUCCESS! All routing tests passed! ✅✅✅")
+            print(" SUCCESS! All routing tests passed! ")
             print("\nYour DRL load balancer is ready to train!")
             print("Next: sudo python3 trainer_with_real_monitoring.py\n")
         else:
-            print("⚠️  Some tests failed. Check controller logs.\n")
+            print("  Some tests failed. Check controller logs.\n")
         
         net.stop()
     
     else:
         # Normal mode: just install flows (network must already be running)
-        print("\n⚠️  Make sure controller and Mininet are running:")
+        print("\n  Make sure controller and Mininet are running:")
         print("   Terminal 1: ryu-manager ryu_controller.py")
         print("   Terminal 2: sudo python3 mininet_topology.py")
         print("\nInstalling flows...\n")
         
         if setup_complete_routing():
-            print("\n✅ Flows installed! Test with:")
+            print("\n Flows installed! Test with:")
             print("   python3 setup_routing_complete.py --test")
         else:
-            print("\n❌ Failed to install flows!")
+            print("\n Failed to install flows!")
 
 if __name__ == '__main__':
     main()
