@@ -16,7 +16,7 @@ This project implements an intelligent load balancer that uses a Deep Q-Network 
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/drl-sdn-load-balancer.git
+   git clone https://github.com/GunarajKhatri/drl-sdn-load-balancer.git
    cd drl-sdn-load-balancer
    ```
 
