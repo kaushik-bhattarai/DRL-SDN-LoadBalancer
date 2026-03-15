@@ -56,14 +56,15 @@ class DQNAgent:
             epsilon = self.epsilon
             
         if np.random.random() < epsilon:
-            return np.random.randint(self.action_dim)
+            return np.random.randint(self.action_dim), None
         
         # Convert state to tensor
         state = torch.FloatTensor(state).unsqueeze(0)  # Add batch dimension
         
         with torch.no_grad():
             q_values = self.q_net(state)
-            return q_values.argmax(dim=1).item()
+            action = q_values.argmax(dim=1).item()
+            return action, q_values.squeeze().cpu().numpy()
 
     def remember(self, state, action, reward, next_state, done):
         """Store transition in replay memory"""

@@ -53,62 +53,70 @@ def detect_dpids():
         print(f"[WARN] Failed to detect DPIDs: {e}")
     return []
 
-def build_state(server_metrics):
+def is_server_alive(host_ip, port=8000, timeout=1.0, net=None):
+    """Check whether a server is alive via a lightweight HTTP probe."""
+    if net is not None:
+        try:
+            client = net.get('h4')
+            if client:
+                res = client.cmd(f'curl -s -o /dev/null -w "%{{http_code}}" -m {timeout} http://{host_ip}:{port}/ 2>/dev/null')
+                return "200" in res
+        except Exception:
+            pass
+    try:
+        r = requests.get(f"http://{host_ip}:{port}/", timeout=timeout)
+        return r.status_code < 500
+    except Exception:
+        return True
+
+
+# Default server IPs used during training (h1, h2, h3 in Mininet)
+SERVER_IPS = ['10.0.0.1', '10.0.0.2', '10.0.0.3']
+HOST_NAMES = ['h1', 'h2', 'h3']
+
+
+def build_state(server_metrics, alive=None):
     """
-    Build connection-dominant state vector (9 features) with Normalization.
-    
-    Per server (x3):
-      - normalized_connection_count  (relative to max connections, 0-1)
-      - connection_share             (fraction of total connections, sums to 1)
-      - normalized_delta             (change relative to total connections)
-    
-    NOTE: load_score removed — variance across servers is consistently < 0.01,
-    making it useless as a distinguishing signal for the agent.
+    Build state vector (9 features): conn_share(3) + load_masked(3) + alive(3).
+
+    This MUST match _build_agent_state() in ryu_controller.py so that the
+    Q-network sees the same feature layout at training and inference time.
+
+    Args:
+        server_metrics: dict keyed by host name ('h1', 'h2', 'h3')
+        alive: np.array of shape (3,) with 1.0/0.0 per server, or None (all alive)
     """
-    if not hasattr(build_state, 'prev_conns'):
-        build_state.prev_conns = {'h1': 0, 'h2': 0, 'h3': 0}
-    
-    conns = []
-    for h in ['h1', 'h2', 'h3']:
-        d = server_metrics.get(h, {})
-        conns.append(d.get('connections', 0))
-    
-    conn_arr = np.array(conns, dtype=np.float32)
-    total_conns = conn_arr.sum() + 1e-8
-    max_conns = max(1.0, conn_arr.max())
-    
-    # Connection share: fraction of total (sums to ~1)
-    conn_share = conn_arr / total_conns  # shape (3,)
-    
-    flat_state = []
-    for i, h in enumerate(['h1', 'h2', 'h3']):
-        # Normalized connection count (relative to max across servers)
-        conn_norm = float(conns[i]) / max_conns
-        
-        # Connection share for this server
-        share = float(conn_share[i])
-        
-        # Normalized delta (change relative to total traffic)
-        delta = conns[i] - build_state.prev_conns[h]
-        delta_norm = delta / max(1.0, float(total_conns))
-        
-        # Clip delta to reasonable range to avoid spikes
-        delta_norm = float(np.clip(delta_norm, -1.0, 1.0))
-        
-        flat_state.extend([conn_norm, share, delta_norm])
-    
-    # Update prev for next call
-    for i, h in enumerate(['h1', 'h2', 'h3']):
-        build_state.prev_conns[h] = conns[i]
-    
-    state_arr = np.array(flat_state, dtype=np.float32)
-    assert not np.isnan(state_arr).any(), "state contains NaN"
-    return state_arr
+    conn_counts = np.array(
+        [server_metrics.get(h, {}).get('connections', 0) for h in HOST_NAMES],
+        dtype=np.float32,
+    )
+    load_vals = np.array(
+        [server_metrics.get(h, {}).get('load_score', 0.0) for h in HOST_NAMES],
+        dtype=np.float32,
+    )
+
+    if alive is None:
+        alive = np.ones(3, dtype=np.float32)
+
+    # --- Fix 1: safe connection-share normalization ---
+    total = conn_counts.sum()
+    if total < 1e-8:
+        conn_share = np.array([1/3, 1/3, 1/3], dtype=np.float32)
+    else:
+        conn_share = conn_counts / total
+
+    # --- Fix 3: mask dead-server load scores ---
+    load_vals_masked = load_vals * alive
+
+    # --- Fix 4: consistent state vector ---
+    state = np.concatenate([conn_share, load_vals_masked, alive])
+    assert not np.isnan(state).any(), "state contains NaN"
+    return state
 
 
 def reset_build_state():
-    """Reset build_state history between episodes."""
-    build_state.prev_conns = {'h1': 0, 'h2': 0, 'h3': 0}
+    """Reset build_state history between episodes (no-op now, kept for compat)."""
+    pass
 
 # Logger is already defined above
 # logger = logging.getLogger(__name__)
@@ -511,6 +519,9 @@ class RealLoadBalancerTrainer:
     def train_episode(self, episode_num, episode_duration, traffic_pattern):
         """
         Train one episode with REAL traffic and metrics.
+
+        Includes Fix 2 (liveness), Fix 3 (load masking), Fix 4 (state vector),
+        and Fix 6 (episode abort on prolonged server death).
         """
         logger.info(f"{'='*30} Episode {episode_num+1} {'='*30}")
         logger.info(f"Pattern: {traffic_pattern.name} | Duration: {episode_duration}s")
@@ -538,19 +549,46 @@ class RealLoadBalancerTrainer:
         action_counts = {}
         
         # Diagnostic: per-feature variance tracking
-        diag_conns = {h: [] for h in ['h1', 'h2', 'h3']}
-        diag_cpus  = {h: [] for h in ['h1', 'h2', 'h3']}
-        diag_loads = {h: [] for h in ['h1', 'h2', 'h3']}
+        diag_conns = {h: [] for h in HOST_NAMES}
+        diag_cpus  = {h: [] for h in HOST_NAMES}
+        diag_loads = {h: [] for h in HOST_NAMES}
         reward_components = {'imbalance': [], 'reward': []}
+        
+        # --- Fix 6: Track consecutive dead-server steps for episode abort ---
+        consecutive_dead_steps = 0
+        DEAD_STEP_THRESHOLD = 3
+        episode_aborted = False
+        # Remember how many transitions we had before this episode
+        memory_start_len = len(self.agent.memory)
         
         # Training loop
         while time.time() - start_time < episode_duration:
-            # 1. Observe state s
+            # --- Fix 2: Server liveness check ---
+            alive = np.array(
+                [float(is_server_alive(ip, net=self.net)) for ip in SERVER_IPS],
+                dtype=np.float32,
+            )
+            
+            # --- Fix 6: Track consecutive dead steps ---
+            if (alive == 0.0).any():
+                consecutive_dead_steps += 1
+                dead_hosts = [HOST_NAMES[i] for i in range(3) if alive[i] == 0.0]
+                if consecutive_dead_steps >= DEAD_STEP_THRESHOLD:
+                    logger.warning(
+                        f"Episode {episode_num+1} aborted: server {', '.join(dead_hosts)} "
+                        f"unreachable for {consecutive_dead_steps}+ steps"
+                    )
+                    episode_aborted = True
+                    break
+            else:
+                consecutive_dead_steps = 0
+            
+            # 1. Observe state s (with liveness and load masking)
             current_metrics = self.server_monitor.get_metrics()
-            state = build_state(current_metrics)
+            state = build_state(current_metrics, alive=alive)
             
             # 2. Select action a
-            action = self.agent.act(state)
+            action, _ = self.agent.act(state)
             action_counts[action] = action_counts.get(action, 0) + 1
             
             # 3. Apply action to controller
@@ -566,11 +604,15 @@ class RealLoadBalancerTrainer:
             # 4. Wait for traffic to flow through the selected server
             time.sleep(1.0)
             
-            # 5. Observe next state s'
+            # 5. Observe next state s' (re-check liveness for next_state)
+            next_alive = np.array(
+                [float(is_server_alive(ip, net=self.net)) for ip in SERVER_IPS],
+                dtype=np.float32,
+            )
             next_metrics = self.server_monitor.get_metrics()
-            next_state = build_state(next_metrics)
+            next_state = build_state(next_metrics, alive=next_alive)
             
-            # 6. Compute reward — Per-action reward (FIX 1)
+            # 6. Compute reward — Per-action reward
             #    +1 = picked least loaded, -1 = picked most loaded
             conn_counts = np.array([
                 next_metrics.get('h1', {}).get('connections', 0),
@@ -578,30 +620,30 @@ class RealLoadBalancerTrainer:
                 next_metrics.get('h3', {}).get('connections', 0),
             ], dtype=np.float32)
 
-            chosen_conn = conn_counts[action]
-            min_conn = conn_counts.min()
-            max_conn = conn_counts.max()
-            denom = max_conn - min_conn + 1e-8
+            # --- Fix 2: Hard penalty for routing to dead server ---
+            if alive[action] == 0.0:
+                reward = -1.0
+                action_reward = -1.0
+                imbalance = 0.0
+            else:
+                chosen_conn = conn_counts[action]
+                min_conn = conn_counts.min()
+                max_conn = conn_counts.max()
+                denom = max_conn - min_conn + 1e-8
 
-            # Per-action component: +1.0 = picked least loaded, -1.0 = picked most loaded
-            action_reward = 1.0 - 2.0 * (chosen_conn - min_conn) / denom
+                # Per-action component: +1.0 = picked least loaded, -1.0 = picked most loaded
+                action_reward = 1.0 - 2.0 * (chosen_conn - min_conn) / denom
 
-            # Secondary: penalise overall imbalance (CV = std / mean)
-            mean_conn = conn_counts.mean()
-            imbalance = float(np.std(conn_counts) / (mean_conn + 1e-8))
+                # Secondary: penalise overall imbalance (CV = std / mean)
+                mean_conn = conn_counts.mean()
+                imbalance = float(np.std(conn_counts) / (mean_conn + 1e-8))
 
-            reward = float(np.clip(action_reward - 0.2 * imbalance, -1.0, 1.0))
+                reward = float(np.clip(action_reward - 0.2 * imbalance, -1.0, 1.0))
 
-            # Debug/Log values
-            metrics = {}  # Local metrics dict for this step
-            metrics['action_reward'] = float(action_reward)
-            metrics['imbalance_cv'] = imbalance
-            metrics['reward'] = reward
-            
             total_reward += reward
             
             # Diagnostic tracking
-            for h in ['h1', 'h2', 'h3']:
+            for h in HOST_NAMES:
                 d = next_metrics.get(h, {})
                 diag_conns[h].append(d.get('connections', 0))
                 diag_cpus[h].append(d.get('cpu', 0.0))
@@ -636,10 +678,35 @@ class RealLoadBalancerTrainer:
                 logger.info(f"[{elapsed:.0f}s] Step {step_count} | "
                       f"R={reward:.4f} (imbal_cv={imbalance:.3f} act_r={float(action_reward):.3f}) | "
                       f"Loss={loss if loss else 0:.4f} Q={q_v:.3f} ∇={g_n:.4f} | "
-                      f"Act={action} conns={conn_counts.tolist()}")
+                      f"Act={action} conns={conn_counts.tolist()} alive={alive.tolist()}")
                 
         # Wait for traffic thread
         traffic_thread.join(timeout=2)
+        
+        # --- Fix 6: Discard this episode's experience if aborted ---
+        if episode_aborted:
+            # Remove transitions added during this episode from replay buffer
+            memory_end_len = len(self.agent.memory)
+            transitions_to_remove = memory_end_len - memory_start_len
+            if transitions_to_remove > 0:
+                for _ in range(transitions_to_remove):
+                    self.agent.memory.pop()
+                logger.warning(
+                    f"Discarded {transitions_to_remove} transitions from aborted episode {episode_num+1}"
+                )
+            # Still record summary stats even for aborted episodes
+            self.episode_rewards.append(0.0)
+            self.episode_losses.append(0.0)
+            self.episode_metrics.append({
+                'total_requests': self.traffic_gen.stats['total_requests'],
+                'successful_requests': self.traffic_gen.stats['successful_requests'],
+                'load_variance': 0.0,
+                'action_distribution': action_counts,
+                'aborted': True,
+            })
+            logger.info(f"Summary Ep {episode_num+1}: ABORTED (server death) | Steps={step_count}")
+            logger.info("-" * 40)
+            return
         
         # Show final server status
         logger.debug("[AFTER] Final server status:")
@@ -671,7 +738,7 @@ class RealLoadBalancerTrainer:
         
         # === DIAGNOSTIC: per-feature variance ===
         logger.debug(f"--- FEATURE VARIANCE DIAGNOSTIC (Episode {episode_num+1}) ---")
-        for h in ['h1', 'h2', 'h3']:
+        for h in HOST_NAMES:
             cv = np.var(diag_conns[h]) if diag_conns[h] else 0
             cpv = np.var(diag_cpus[h]) if diag_cpus[h] else 0
             lv = np.var(diag_loads[h]) if diag_loads[h] else 0
@@ -705,13 +772,18 @@ class RealLoadBalancerTrainer:
         
         # Helper to get greedy action
         def get_greedy_action(s):
-             # Manual greedy: just argmax Q
-             # We assume agent.act(..., epsilon=0) does this
-             return self.agent.act(s, epsilon=0.0)
+             action, _ = self.agent.act(s, epsilon=0.0)
+             return action
         
         while time.time() - start_time < duration:
+            # Check liveness for consistent state vector
+            alive = np.array(
+                [float(is_server_alive(ip, net=self.net)) for ip in SERVER_IPS],
+                dtype=np.float32,
+            )
+            
             metrics = self.server_monitor.get_metrics()
-            state = build_state(metrics)
+            state = build_state(metrics, alive=alive)
             action = get_greedy_action(state)
             
             # Apply action
@@ -722,7 +794,7 @@ class RealLoadBalancerTrainer:
             
             time.sleep(1.0)
             
-            # Compute reward (consistent with Fix 1 in train_episode)
+            # Compute reward (consistent with train_episode)
             next_metrics = self.server_monitor.get_metrics()
             conn_counts = np.array([
                 next_metrics.get('h1', {}).get('connections', 0),
@@ -730,20 +802,19 @@ class RealLoadBalancerTrainer:
                 next_metrics.get('h3', {}).get('connections', 0),
             ], dtype=np.float32)
 
-            chosen_conn = conn_counts[action]
-            min_conn, max_conn = conn_counts.min(), conn_counts.max()
-            denom = max_conn - min_conn + 1e-8
+            # Dead-server penalty
+            if alive[action] == 0.0:
+                reward = -1.0
+            else:
+                chosen_conn = conn_counts[action]
+                min_conn, max_conn = conn_counts.min(), conn_counts.max()
+                denom = max_conn - min_conn + 1e-8
+                action_reward = 1.0 - 2.0 * (chosen_conn - min_conn) / denom
+                mean_conn = conn_counts.mean()
+                imbalance = float(np.std(conn_counts) / (mean_conn + 1e-8))
+                reward = float(np.clip(action_reward - 0.2 * imbalance, -1.0, 1.0))
 
-            # Per-action component
-            action_reward = 1.0 - 2.0 * (chosen_conn - min_conn) / denom
-            
-            # Secondary: imbalance (CV)
-            mean_conn = conn_counts.mean()
-            imbalance = float(np.std(conn_counts) / (mean_conn + 1e-8))
-
-            reward = float(np.clip(action_reward - 0.2 * imbalance, -1.0, 1.0))
             total_eval_reward += reward
-            
             step_count += 1
             
         traffic_thread.join(timeout=2)

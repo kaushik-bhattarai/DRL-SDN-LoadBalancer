@@ -67,3 +67,8 @@ evaluation:
 logging:
   save_interval: 10       # Save checkpoint every N episodes
   log_interval: 1         # Print stats every N episodes
+
+# Inference (controller startup load + inference.py)
+inference:
+  enabled: true
+  model_path: "models/final/dqn_final.pth"

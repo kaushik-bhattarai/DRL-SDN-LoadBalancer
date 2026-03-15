@@ -21,6 +21,9 @@ from ryu.lib.packet import packet, ethernet, arp, ether_types, ipv4, tcp, udp, i
 from ryu.lib import hub
 
 import json
+import os
+import time
+import numpy as np
 from webob import Response
 
 print("\n\n" + "="*80)
@@ -78,6 +81,49 @@ class SDNRest(app_manager.RyuApp):
         # DRL Agent
         self.drl_agent = None
         self.server_monitor = None
+        self._external_metrics = {}  # Metrics pushed via REST /update_metrics
+
+        # Optional: load trained model at startup for inference (config or env SDRLB_MODEL_PATH)
+        _controller_dir = os.path.dirname(os.path.abspath(__file__))
+        _model_path = os.environ.get('SDRLB_MODEL_PATH')
+        if _model_path is None:
+            try:
+                import yaml
+                _config_path = os.path.join(_controller_dir, 'config.yaml')
+                if os.path.isfile(_config_path):
+                    with open(_config_path) as _f:
+                        _config = yaml.safe_load(_f)
+                    _inf = _config.get('inference', {})
+                    if _inf.get('enabled') and _inf.get('model_path'):
+                        _model_path = _inf.get('model_path')
+            except Exception:
+                pass
+        if _model_path and not os.path.isabs(_model_path):
+            _model_path = os.path.join(_controller_dir, _model_path)
+        if _model_path and os.path.isfile(_model_path):
+            try:
+                import sys
+                if _controller_dir not in sys.path:
+                    sys.path.insert(0, _controller_dir)
+                from drl_agent import DQNAgent
+                import yaml
+                _config_path = os.path.join(_controller_dir, 'config.yaml')
+                with open(_config_path) as _f:
+                    _config = yaml.safe_load(_f)
+                self.drl_agent = DQNAgent(_config)
+                if self.drl_agent.load_model(_model_path):
+                    self.logger.info(f"Loaded trained DRL model from {_model_path}, running inference")
+                else:
+                    self.drl_agent = None
+                    self.logger.info("No model found, using round-robin fallback")
+            except Exception as e:
+                self.drl_agent = None
+                self.logger.warning(f"Failed to load model from {_model_path}: {e}. Using round-robin fallback.")
+        else:
+            if not _model_path:
+                self.logger.info("No model found, using round-robin fallback")
+            else:
+                self.logger.info(f"Model file not found: {_model_path}, using round-robin fallback")
         
         # VIP tracking
         self.vip_sessions = {}
@@ -280,30 +326,36 @@ class SDNRest(app_manager.RyuApp):
             # Get server metrics
             if self.server_monitor:
                 server_metrics = self.server_monitor.get_metrics()
+            elif self._external_metrics:
+                server_metrics = self._external_metrics
             else:
                 server_metrics = {ip: {'load_score': 0.5} for ip in self.server_pool.keys()}
             
             # Build state
             state = self._build_agent_state(server_metrics, dpid)
             
-            # Agent selects action (0, 1, 2) using greedy policy (no exploration in controller)
-            action = self.drl_agent.act(state, epsilon=0.0)  # ← FIX: This was missing!
+            # Agent selects action (0, 1, 2) and returns Q-values for diagnostics
+            action, q_values = self.drl_agent.act(state, epsilon=0.0)
             
             # Map action to server
             server_ips = sorted(list(self.server_pool.keys()))
             if action < len(server_ips):
                 selected_ip = server_ips[action]
             else:
-                # Fallback if action is out of bounds (shouldn't happen with correct config)
                 selected_ip = server_ips[0]
             
-            self.logger.info(f"🤖 DRL selected: {selected_ip} (action={action})")
+            # Diagnostic logging
+            q_str = ", ".join([f"{v:.4f}" for v in q_values])
+            state_str = ", ".join([f"{s:.2f}" for s in state])
+            self.logger.info(f"🤖 DRL Decision: State=[{state_str}]")
+            self.logger.info(f"🤖 DRL selection: {selected_ip} (action={action}) | Q-values=[{q_str}]")
             
             # Track decision
             self.vip_stats['agent_decisions'].append({
                 'client_ip': client_ip,
                 'selected_server': selected_ip,
-                'action': action
+                'action': action,
+                'q_values': q_values.tolist()
             })
             
             return selected_ip, self.server_pool[selected_ip]
@@ -313,36 +365,51 @@ class SDNRest(app_manager.RyuApp):
             selected_ip = list(self.server_pool.keys())[0]
             return selected_ip, self.server_pool[selected_ip]
     
+    def _is_server_alive(self, host_ip, port=8000, timeout=1.0):
+        """Check if a server is alive via HTTP health check."""
+        try:
+            r = requests.get(f"http://{host_ip}:{port}/", timeout=timeout)
+            return r.status_code < 500
+        except Exception:
+            # Fallback to True since controller runs on Host OS and cannot reach Mininet IPs
+            return True
+
     def _build_agent_state(self, server_metrics, dpid):
-        """Build state for DRL agent (9 features: conn, load, delta × 3 servers)"""
-        if not hasattr(self, '_prev_conns'):
-            self._prev_conns = {}
-        
-        conns = []
-        loads = []
-        for server_ip in sorted(self.server_pool.keys()):
-            m = server_metrics.get(server_ip, {})
-            conns.append(m.get('connections', 0))
-            loads.append(m.get('load_score', 0.0))
-        
-        max_conns = max(max(conns), 1)
-        
-        state = []
-        for i, server_ip in enumerate(sorted(self.server_pool.keys())):
-            conn_norm = conns[i] / max_conns
-            load_norm = loads[i]
-            
-            prev_c = self._prev_conns.get(server_ip, conns[i])
-            delta = conns[i] - prev_c
-            delta_norm = max(-1.0, min(1.0, delta / max(max_conns * 0.1, 1)))
-            
-            state.extend([conn_norm, load_norm, delta_norm])
-            self._prev_conns[server_ip] = conns[i]
-        
-        while len(state) < 9:
-            state.append(0.0)
-        
-        return state[:9]
+        """Build state for DRL agent (9 features: conn_share(3) + load_masked(3) + alive(3)).
+
+        Matches the state vector used during training so the Q-network
+        receives consistent inputs at inference time.
+        """
+        server_ips = sorted(self.server_pool.keys())
+
+        conn_counts = np.array(
+            [server_metrics.get(ip, {}).get('connections', 0) for ip in server_ips],
+            dtype=np.float32,
+        )
+        load_vals = np.array(
+            [server_metrics.get(ip, {}).get('load_score', 0.0) for ip in server_ips],
+            dtype=np.float32,
+        )
+
+        # --- Fix 1: safe connection-share normalization ---
+        total = conn_counts.sum()
+        if total < 1e-8:
+            conn_share = np.array([1/3, 1/3, 1/3], dtype=np.float32)
+        else:
+            conn_share = conn_counts / total
+
+        # --- Liveness flags ---
+        alive = np.array(
+            [float(self._is_server_alive(ip)) for ip in server_ips],
+            dtype=np.float32,
+        )
+
+        # --- Fix 3: mask dead-server load scores ---
+        load_vals_masked = load_vals * alive
+
+        # --- Fix 4: consistent state vector ---
+        state = np.concatenate([conn_share, load_vals_masked, alive])
+        return state.tolist()[:9]
     
     def handle_vip_packet(self, ev, ip_pkt, tcp_pkt, udp_pkt):
         """Handle VIP packet with DNAT"""
@@ -870,6 +937,52 @@ class SDNRestController(ControllerBase):
             _app_instance.logger.error(f"❌ Weight update failed: {e}")
             return Response(status=500, body=json.dumps({'error': str(e)}).encode('utf-8'))
 
+    @route('sdrlb', BASE_URL + '/load_model', methods=['POST'])
+    def load_model(self, req, **kwargs):
+        """Load trained model from path (hot-swap without restart)."""
+        try:
+            data = json.loads(req.body)
+            model_path = data.get('model_path')
+            if not model_path:
+                return Response(status=400, body=json.dumps({
+                    'status': 'error',
+                    'reason': 'Missing model_path'
+                }).encode('utf-8'))
+            controller_dir = os.path.dirname(os.path.abspath(__file__))
+            if not os.path.isabs(model_path):
+                model_path = os.path.join(controller_dir, model_path)
+            if not os.path.isfile(model_path):
+                return Response(status=400, body=json.dumps({
+                    'status': 'error',
+                    'reason': f'File not found: {model_path}'
+                }).encode('utf-8'))
+            import sys
+            import yaml
+            if controller_dir not in sys.path:
+                sys.path.insert(0, controller_dir)
+            from drl_agent import DQNAgent
+            config_path = os.path.join(controller_dir, 'config.yaml')
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+            if not _app_instance.drl_agent:
+                _app_instance.drl_agent = DQNAgent(config)
+            if not _app_instance.drl_agent.load_model(model_path):
+                return Response(status=500, body=json.dumps({
+                    'status': 'error',
+                    'reason': 'load_model returned False'
+                }).encode('utf-8'))
+            _app_instance.logger.info(f"Loaded model from {model_path} (hot-swap)")
+            return Response(status=200, body=json.dumps({
+                'status': 'ok',
+                'model': model_path
+            }).encode('utf-8'))
+        except Exception as e:
+            _app_instance.logger.error(f"❌ load_model failed: {e}")
+            return Response(status=500, body=json.dumps({
+                'status': 'error',
+                'reason': str(e)
+            }).encode('utf-8'))
+
     @route('sdn', BASE_URL + '/stats/flow/{dpid}', methods=['GET'])
     def get_flow_stats(self, req, **kwargs):
         dpid = int(kwargs['dpid'])
@@ -969,3 +1082,16 @@ class SDNRestController(ControllerBase):
         }
         return Response(status=200, content_type='application/json',
                         body=json.dumps(stats).encode('utf-8'))
+
+    @route('sdrlb', BASE_URL + '/update_metrics', methods=['POST'])
+    def update_metrics(self, req, **kwargs):
+        """Accept server metrics from external monitor (e.g. run_inference_eval.py).
+
+        Expected JSON:  {"10.0.0.1": {"connections": N, "load_score": F, ...}, ...}
+        """
+        try:
+            data = json.loads(req.body)
+            _app_instance._external_metrics = data
+            return Response(status=200, body=json.dumps({'status': 'metrics_updated'}).encode('utf-8'))
+        except Exception as e:
+            return Response(status=500, body=json.dumps({'error': str(e)}).encode('utf-8'))

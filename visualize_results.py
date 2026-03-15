@@ -68,16 +68,7 @@ def visualize_results(log_path='logs/training_with_real_load.json', output_dir='
     ax3.grid(True, linestyle='--', alpha=0.7)
     ax3.legend()
 
-    # Highlight Episode 126 (H1 Failure)
-    failure_ep = 126
-    for ax in [ax1, ax2, ax3]:
-        ax.axvline(x=failure_ep, color='black', linestyle=':', linewidth=2)
-        ax.annotate('h1 Failure point', xy=(failure_ep, 0.5), xycoords=('data', 'axes fraction'),
-                    xytext=(10, 0), textcoords='offset points', color='black', fontweight='bold')
 
-    # Add background shade for the exploitation phase
-    for ax in [ax1, ax2, ax3]:
-        ax.axvspan(failure_ep, len(rewards)-1, alpha=0.1, color='red', label='Exploitation Phase')
 
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(f'{output_dir}/training_summary.png', dpi=300, bbox_inches='tight')
