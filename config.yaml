@@ -21,6 +21,21 @@ training:
   memory_size: 10000      # Replay buffer size
   gamma: 0.99             # Discount factor for future rewards
 
+  # Phase 3: Synthetic failure injection during training
+  failure_injection:
+    enabled: true
+    start_episode: 50        # Begin injection after basic policy is learned
+    probability: 0.3         # 30% of episodes after start_episode get a failure
+    duration_steps: 8        # ~8 seconds of simulated failure per injection
+    multi_server_prob: 0.1   # 10% chance of killing 2 servers simultaneously
+
+  # Phase 5: Prioritized Experience Replay (conditional — see gate check)
+  per:
+    enabled: false           # Enable only if Phase 3+4 gap persists at N=30
+    alpha: 0.6               # Priority exponent
+    beta_start: 0.4          # IS weight exponent (annealed to 1.0)
+    beta_increment: 0.001    # Per-step beta annealing
+
 # Reward Function Weights
 training_reward_weights:
   alpha: 1.0              # Weight for latency (reduced from 10.0)
@@ -72,3 +87,13 @@ logging:
 inference:
   enabled: true
   model_path: "models/final/dqn_final.pth"
+
+# Phase 4: Heuristic fallback with hysteresis
+# Thresholds are derived from fallback_threshold_sweep.py crossover experiment.
+# Set to null until sweep is complete, which disables fallback.
+fallback:
+  enabled: false
+  engage_threshold: null     # failures/window to switch from DRL → LC
+  disengage_threshold: null  # failures/window to switch back DRL (< engage)
+  observation_window: 60     # seconds
+  algorithm: "least_connections"

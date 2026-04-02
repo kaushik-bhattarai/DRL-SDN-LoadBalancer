@@ -520,8 +520,16 @@ class RealLoadBalancerTrainer:
         """
         Train one episode with REAL traffic and metrics.
 
-        Includes Fix 2 (liveness), Fix 3 (load masking), Fix 4 (state vector),
-        and Fix 6 (episode abort on prolonged server death).
+        Includes Fix 2 (liveness), Fix 3 (load masking), Fix 4 (state vector).
+
+        Phase 3 changes:
+        - (3A) Synthetic failure injection after episode 50 to expose the agent
+          to alive=0 transitions that are otherwise absent from training.
+        - (3B) Removed episode-abort-on-death.  Previously, any natural failure
+          caused the episode to abort and ALL transitions to be discarded,
+          completely preventing the agent from learning failure responses.
+          Now the episode continues and the -1.0 dead-server reward teaches
+          the agent directly.
         """
         logger.info(f"{'='*30} Episode {episode_num+1} {'='*30}")
         logger.info(f"Pattern: {traffic_pattern.name} | Duration: {episode_duration}s")
@@ -533,6 +541,45 @@ class RealLoadBalancerTrainer:
         logger.debug("[BEFORE] Initial server status:")
         if logger.isEnabledFor(logging.DEBUG):
              self.server_monitor.print_status()
+        
+        # --- Phase 3A: Determine synthetic failure injection for this episode ---
+        fi_cfg = self.config.get('training', {}).get('failure_injection', {})
+        fi_enabled = fi_cfg.get('enabled', False)
+        fi_start_ep = fi_cfg.get('start_episode', 50)
+        fi_prob = fi_cfg.get('probability', 0.3)
+        fi_duration = fi_cfg.get('duration_steps', 8)
+        fi_multi_prob = fi_cfg.get('multi_server_prob', 0.1)
+
+        inject_failure = (
+            fi_enabled
+            and episode_num >= fi_start_ep
+            and np.random.random() < fi_prob
+        )
+
+        # Pre-compute failure schedule for this episode
+        synth_failure_server = -1
+        synth_failure_server_2 = -1
+        synth_failure_start = -1
+        synth_failure_end = -1
+
+        if inject_failure:
+            synth_failure_server = int(np.random.randint(3))
+            max_start = max(1, int(episode_duration) - fi_duration - 5)
+            synth_failure_start = int(np.random.randint(3, max_start))
+            synth_failure_end = synth_failure_start + fi_duration
+
+            # Optionally kill a second server (higher difficulty)
+            if np.random.random() < fi_multi_prob:
+                candidates = [i for i in range(3) if i != synth_failure_server]
+                synth_failure_server_2 = int(np.random.choice(candidates))
+
+            servers_str = str(synth_failure_server)
+            if synth_failure_server_2 >= 0:
+                servers_str += f",{synth_failure_server_2}"
+            logger.info(
+                f"[INJECT] Synthetic failure: server(s) {servers_str} "
+                f"steps {synth_failure_start}-{synth_failure_end}"
+            )
         
         # Start traffic generation
         traffic_thread = threading.Thread(
@@ -554,13 +601,6 @@ class RealLoadBalancerTrainer:
         diag_loads = {h: [] for h in HOST_NAMES}
         reward_components = {'imbalance': [], 'reward': []}
         
-        # --- Fix 6: Track consecutive dead-server steps for episode abort ---
-        consecutive_dead_steps = 0
-        DEAD_STEP_THRESHOLD = 3
-        episode_aborted = False
-        # Remember how many transitions we had before this episode
-        memory_start_len = len(self.agent.memory)
-        
         # Training loop
         while time.time() - start_time < episode_duration:
             # --- Fix 2: Server liveness check ---
@@ -569,19 +609,28 @@ class RealLoadBalancerTrainer:
                 dtype=np.float32,
             )
             
-            # --- Fix 6: Track consecutive dead steps ---
-            if (alive == 0.0).any():
-                consecutive_dead_steps += 1
-                dead_hosts = [HOST_NAMES[i] for i in range(3) if alive[i] == 0.0]
-                if consecutive_dead_steps >= DEAD_STEP_THRESHOLD:
-                    logger.warning(
-                        f"Episode {episode_num+1} aborted: server {', '.join(dead_hosts)} "
-                        f"unreachable for {consecutive_dead_steps}+ steps"
+            # --- Phase 3A: Override alive with synthetic failure ---
+            if inject_failure and synth_failure_start <= step_count < synth_failure_end:
+                alive[synth_failure_server] = 0.0
+                if synth_failure_server_2 >= 0:
+                    alive[synth_failure_server_2] = 0.0
+                if step_count == synth_failure_start:
+                    logger.info(
+                        f"[INJECT] Synthetic failure ACTIVE: "
+                        f"alive={alive.tolist()} (step {step_count})"
                     )
-                    episode_aborted = True
-                    break
-            else:
-                consecutive_dead_steps = 0
+
+            # --- Phase 3B: Log dead servers but DO NOT abort ---
+            # (Previously, 3+ consecutive dead steps aborted the episode and
+            #  discarded all transitions — preventing the agent from ever
+            #  learning failure responses.)
+            if (alive == 0.0).any():
+                dead_hosts = [HOST_NAMES[i] for i in range(3) if alive[i] == 0.0]
+                if step_count % 5 == 0:
+                    logger.warning(
+                        f"Dead servers detected: {', '.join(dead_hosts)} — "
+                        f"continuing episode (step {step_count})"
+                    )
             
             # 1. Observe state s (with liveness and load masking)
             current_metrics = self.server_monitor.get_metrics()
@@ -609,6 +658,12 @@ class RealLoadBalancerTrainer:
                 [float(is_server_alive(ip, net=self.net)) for ip in SERVER_IPS],
                 dtype=np.float32,
             )
+            # Apply synthetic failure override to next_alive as well
+            if inject_failure and synth_failure_start <= step_count < synth_failure_end:
+                next_alive[synth_failure_server] = 0.0
+                if synth_failure_server_2 >= 0:
+                    next_alive[synth_failure_server_2] = 0.0
+
             next_metrics = self.server_monitor.get_metrics()
             next_state = build_state(next_metrics, alive=next_alive)
             
@@ -682,31 +737,6 @@ class RealLoadBalancerTrainer:
                 
         # Wait for traffic thread
         traffic_thread.join(timeout=2)
-        
-        # --- Fix 6: Discard this episode's experience if aborted ---
-        if episode_aborted:
-            # Remove transitions added during this episode from replay buffer
-            memory_end_len = len(self.agent.memory)
-            transitions_to_remove = memory_end_len - memory_start_len
-            if transitions_to_remove > 0:
-                for _ in range(transitions_to_remove):
-                    self.agent.memory.pop()
-                logger.warning(
-                    f"Discarded {transitions_to_remove} transitions from aborted episode {episode_num+1}"
-                )
-            # Still record summary stats even for aborted episodes
-            self.episode_rewards.append(0.0)
-            self.episode_losses.append(0.0)
-            self.episode_metrics.append({
-                'total_requests': self.traffic_gen.stats['total_requests'],
-                'successful_requests': self.traffic_gen.stats['successful_requests'],
-                'load_variance': 0.0,
-                'action_distribution': action_counts,
-                'aborted': True,
-            })
-            logger.info(f"Summary Ep {episode_num+1}: ABORTED (server death) | Steps={step_count}")
-            logger.info("-" * 40)
-            return
         
         # Show final server status
         logger.debug("[AFTER] Final server status:")

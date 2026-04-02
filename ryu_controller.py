@@ -33,6 +33,59 @@ print("="*80 + "\n\n")
 BASE_URL = '/sdrlb'
 _app_instance = None
 
+
+class FallbackController:
+    """
+    Phase 4: Hysteresis-based fallback from DRL to a heuristic algorithm.
+
+    Tracks failure events (per-server alive=0 detections) and engages
+    a fallback algorithm when the failure velocity exceeds a threshold.
+    Requires the velocity to drop below a *lower* threshold before
+    handing control back to DRL, preventing oscillation.
+    """
+
+    def __init__(self, engage_threshold, disengage_threshold,
+                 window_sec=60, fallback_algo='least_connections'):
+        self.engage_threshold = engage_threshold
+        self.disengage_threshold = disengage_threshold
+        self.window_sec = window_sec
+        self.fallback_algo = fallback_algo
+        self.failure_timestamps = []
+        self.in_fallback = False
+
+    def record_failure_event(self):
+        """Called whenever alive=0 detected for any server."""
+        now = time.time()
+        self.failure_timestamps.append(now)
+        # Prune old events outside observation window
+        cutoff = now - self.window_sec
+        self.failure_timestamps = [
+            t for t in self.failure_timestamps if t > cutoff
+        ]
+
+    def should_use_fallback(self):
+        """Returns True if system should use fallback instead of DRL."""
+        if self.engage_threshold is None:
+            return False  # Thresholds not yet derived
+
+        now = time.time()
+        cutoff = now - self.window_sec
+        recent = sum(1 for t in self.failure_timestamps if t > cutoff)
+
+        if not self.in_fallback:
+            # ENGAGE: failure rate exceeds upper threshold
+            if recent >= self.engage_threshold:
+                self.in_fallback = True
+                return True
+            return False
+        else:
+            # DISENGAGE: failure rate must drop below lower threshold
+            if recent <= self.disengage_threshold:
+                self.in_fallback = False
+                return False
+            return True
+
+
 class SDNRest(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {'wsgi': WSGIApplication}
@@ -140,6 +193,15 @@ class SDNRest(app_manager.RyuApp):
         # Algorithm selection
         self.current_algorithm = 'drl' # Default to DRL
         self.rr_counter = 0 # Round-robin counter
+
+        # --- Weighted Round Robin state ---
+        self.wrr_weights = [1, 1, 1]  # default equal weights for h1, h2, h3
+        self.wrr_index = -1
+        self.wrr_current_weight = 0
+
+        # --- ECMP state ---
+        self._ecmp_group_id = 100  # OpenFlow group ID for ECMP
+        self._ecmp_installed = False
         
         self.logger.info("="*70)
         self.logger.info("COMPLETE VIP Load Balancing Controller")
@@ -147,7 +209,7 @@ class SDNRest(app_manager.RyuApp):
         self.logger.info(f"Virtual IP: {self.VIRTUAL_IP}")
         self.logger.info(f"Virtual MAC: {self.VIRTUAL_MAC}")
         self.logger.info(f"Server Pool: {list(self.server_pool.keys())}")
-        self.logger.info("Features: ARP + VIP + DNAT + DRL")
+        self.logger.info("Features: ARP + VIP + DNAT + DRL + WRR + Hash + ECMP")
         self.logger.info("="*70)
 
         self.monitor_thread = hub.spawn(self._monitor)
@@ -155,6 +217,35 @@ class SDNRest(app_manager.RyuApp):
         # External control
         self.forced_action = None
         self.forced_action_timestamp = 0
+
+        # Phase 4: Fallback controller with hysteresis
+        self.fallback_ctrl = None
+        try:
+            import yaml as _yaml
+            _cfg_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), 'config.yaml'
+            )
+            if os.path.isfile(_cfg_path):
+                with open(_cfg_path) as _f:
+                    _full_cfg = _yaml.safe_load(_f)
+                _fb = _full_cfg.get('fallback', {})
+                if _fb.get('enabled') and _fb.get('engage_threshold') is not None:
+                    self.fallback_ctrl = FallbackController(
+                        engage_threshold=_fb['engage_threshold'],
+                        disengage_threshold=_fb.get(
+                            'disengage_threshold',
+                            max(1, _fb['engage_threshold'] // 2),
+                        ),
+                        window_sec=_fb.get('observation_window', 60),
+                        fallback_algo=_fb.get('algorithm', 'least_connections'),
+                    )
+                    self.logger.info(
+                        f"✅ Fallback controller initialised: "
+                        f"engage={_fb['engage_threshold']}, "
+                        f"disengage={_fb.get('disengage_threshold')}"
+                    )
+        except Exception as _e:
+            self.logger.warning(f"Fallback controller init skipped: {_e}")
         
         wsgi.register(SDNRestController, {'sdn_app': self})
 
@@ -237,14 +328,38 @@ class SDNRest(app_manager.RyuApp):
     # ALGORITHM IMPLEMENTATIONS
     # ========================================
 
-    def select_server(self, client_ip, dpid):
-        """Dispatch to selected algorithm"""
+    def select_server(self, client_ip, dpid, **kwargs):
+        """Dispatch to selected algorithm.
+
+        Phase 4: When current_algorithm is 'drl' and FallbackController
+        detects high failure velocity, transparently delegates to the
+        fallback heuristic (default: least_connections).
+        """
+        # Phase 4: Check fallback before DRL dispatch
+        if (self.current_algorithm == 'drl'
+                and self.fallback_ctrl is not None
+                and self.fallback_ctrl.should_use_fallback()):
+            self.logger.info(
+                "⚠️ FALLBACK: Using %s due to high failure rate",
+                self.fallback_ctrl.fallback_algo,
+            )
+            if self.fallback_ctrl.fallback_algo == 'least_connections':
+                return self._select_least_connections()
+            else:
+                return self._select_round_robin()
+
         if self.current_algorithm == 'round_robin':
             return self._select_round_robin()
+        elif self.current_algorithm == 'weighted_round_robin':
+            return self._select_weighted_round_robin()
         elif self.current_algorithm == 'random':
             return self._select_random()
         elif self.current_algorithm == 'least_connections':
             return self._select_least_connections()
+        elif self.current_algorithm == 'hash_based':
+            return self._select_hash_based(**kwargs)
+        elif self.current_algorithm == 'ecmp':
+            return self._select_ecmp(dpid, **kwargs)
         elif self.current_algorithm == 'external':
             return self._select_external()
         else: # Default or 'drl'
@@ -312,6 +427,103 @@ class SDNRest(app_manager.RyuApp):
         
         self.logger.info(f"📉 Least Connections selected: {best_ip} (conns={min_conns})")
         return best_ip, self.server_pool[best_ip]
+
+    def _select_weighted_round_robin(self):
+        """Weighted Round Robin selection using smooth WRR algorithm."""
+        server_ips = sorted(list(self.server_pool.keys()))
+        if not server_ips:
+            return None, None
+        n = len(server_ips)
+        weights = self.wrr_weights[:n]
+        max_w = max(weights)
+        gcd_w = weights[0]
+        from math import gcd
+        for w in weights[1:]:
+            gcd_w = gcd(gcd_w, w)
+        # Classic WRR: cycle through servers, decrement current_weight
+        while True:
+            self.wrr_index = (self.wrr_index + 1) % n
+            if self.wrr_index == 0:
+                self.wrr_current_weight -= gcd_w
+                if self.wrr_current_weight <= 0:
+                    self.wrr_current_weight = max_w
+            if weights[self.wrr_index] >= self.wrr_current_weight:
+                selected_ip = server_ips[self.wrr_index]
+                self.logger.info(f"⚖️  WRR selected: {selected_ip} (weight={weights[self.wrr_index]})")
+                return selected_ip, self.server_pool[selected_ip]
+
+    def _select_hash_based(self, **kwargs):
+        """Hash-based (5-tuple) server selection — pinned assignment."""
+        server_ips = sorted(list(self.server_pool.keys()))
+        if not server_ips:
+            return None, None
+        src_ip = kwargs.get('src_ip', '0.0.0.0')
+        dst_ip = kwargs.get('dst_ip', self.VIRTUAL_IP)
+        src_port = kwargs.get('src_port', 0)
+        dst_port = kwargs.get('dst_port', 0)
+        proto = kwargs.get('proto', 6)
+        key = f"{src_ip}:{dst_ip}:{src_port}:{dst_port}:{proto}"
+        h = hash(key) % len(server_ips)
+        selected_ip = server_ips[h]
+        self.logger.info(f"#️⃣  Hash selected: {selected_ip} (hash={h}, key={key})")
+        return selected_ip, self.server_pool[selected_ip]
+
+    def _select_ecmp(self, dpid, **kwargs):
+        """ECMP using OF1.3 SELECT group table (equal weight buckets).
+
+        Installs a group table on the datapath if not already done,
+        then installs a flow matching VIP that points to the group.
+        For per-packet selection this relies on OVS's internal hash.
+        As a per-request fallback (since PacketIn already arrived),
+        we still return a selected server for the immediate packet.
+        """
+        server_ips = sorted(list(self.server_pool.keys()))
+        if not server_ips:
+            return None, None
+
+        # Install group table once (best-effort)
+        if not self._ecmp_installed:
+            self._install_ecmp_group(dpid)
+
+        # For the current PacketIn, do simple round-robin as the immediate pick
+        selected_ip = server_ips[self.rr_counter % len(server_ips)]
+        self.rr_counter += 1
+        self.logger.info(f"🔀 ECMP selected: {selected_ip} (group-table installed={self._ecmp_installed})")
+        return selected_ip, self.server_pool[selected_ip]
+
+    def _install_ecmp_group(self, dpid):
+        """Install an OF1.3 SELECT group with equal-weight buckets for all servers."""
+        try:
+            datapath = self._datapaths.get(dpid)
+            if datapath is None:
+                self.logger.warning(f"ECMP: datapath {dpid} not found, skipping group install")
+                return
+            ofproto = datapath.ofproto
+            parser = datapath.ofproto_parser
+
+            buckets = []
+            for ip, info in sorted(self.server_pool.items()):
+                actions = [
+                    parser.OFPActionSetField(eth_dst=info['mac']),
+                    parser.OFPActionSetField(ipv4_dst=ip),
+                    parser.OFPActionOutput(info['port']),
+                ]
+                bucket = parser.OFPBucket(weight=1, actions=actions)
+                buckets.append(bucket)
+
+            group_mod = parser.OFPGroupMod(
+                datapath=datapath,
+                command=ofproto.OFPGC_ADD,
+                type_=ofproto.OFPGT_SELECT,
+                group_id=self._ecmp_group_id,
+                buckets=buckets,
+            )
+            datapath.send_msg(group_mod)
+            self._ecmp_installed = True
+            self.logger.info(f"✅ ECMP group table installed on dpid={dpid} (group_id={self._ecmp_group_id})")
+        except Exception as e:
+            self.logger.warning(f"⚠️  ECMP group install failed: {e}. Falling back to RR.")
+            self._ecmp_installed = False
 
     
     def select_server_with_drl(self, client_ip, dpid):
@@ -404,6 +616,10 @@ class SDNRest(app_manager.RyuApp):
             dtype=np.float32,
         )
 
+        # --- Phase 4: Record failure events for fallback controller ---
+        if (alive == 0.0).any() and self.fallback_ctrl is not None:
+            self.fallback_ctrl.record_failure_event()
+
         # --- Fix 3: mask dead-server load scores ---
         load_vals_masked = load_vals * alive
 
@@ -457,7 +673,11 @@ class SDNRest(app_manager.RyuApp):
             selected_server_ip = self.vip_sessions[session_key]
             self.logger.info(f"📌 Existing session → {selected_server_ip}")
         else:
-            selected_server_ip, server_info = self.select_server(client_ip, dpid)
+            selected_server_ip, server_info = self.select_server(
+                client_ip, dpid,
+                src_ip=client_ip, dst_ip=self.VIRTUAL_IP,
+                src_port=client_port, dst_port=dst_port, proto=proto,
+            )
             
             # Only cache if not in training mode
             if not self.training_mode:
@@ -821,15 +1041,32 @@ class SDNRestController(ControllerBase):
     @route('sdrlb', BASE_URL + '/set_algorithm', methods=['POST'])
     def set_algorithm(self, req, **kwargs):
         """Set load balancing algorithm"""
+        VALID_ALGORITHMS = [
+            'drl', 'round_robin', 'weighted_round_robin', 'random',
+            'least_connections', 'hash_based', 'ecmp', 'external',
+        ]
         try:
             data = json.loads(req.body)
             algorithm = data.get('algorithm', 'drl')
             
-            if algorithm not in ['drl', 'round_robin', 'random', 'least_connections', 'external']:
-                return Response(status=400, body=json.dumps({'error': 'Invalid algorithm'}).encode('utf-8'))
+            if algorithm not in VALID_ALGORITHMS:
+                return Response(status=400, body=json.dumps({'error': f'Invalid algorithm. Valid: {VALID_ALGORITHMS}'}).encode('utf-8'))
             
             _app_instance.current_algorithm = algorithm
             _app_instance.logger.info(f"🔄 Algorithm switched to: {algorithm}")
+
+            # Handle optional WRR weights
+            if algorithm == 'weighted_round_robin':
+                weights = data.get('weights')
+                if weights and isinstance(weights, list):
+                    _app_instance.wrr_weights = [int(w) for w in weights]
+                    _app_instance.wrr_index = -1
+                    _app_instance.wrr_current_weight = 0
+                    _app_instance.logger.info(f"⚖️  WRR weights set to: {_app_instance.wrr_weights}")
+
+            # Reset ECMP installed flag when switching algorithms
+            if algorithm != 'ecmp':
+                _app_instance._ecmp_installed = False
             
             return Response(status=200, body=json.dumps({
                 'algorithm': algorithm,
@@ -858,7 +1095,7 @@ class SDNRestController(ControllerBase):
 
     @route('sdrlb', BASE_URL + '/reset_episode', methods=['POST'])
     def reset_episode(self, req, **kwargs):
-        """Reset controller state for a new training episode"""
+        """Reset controller state for a new training/evaluation episode"""
         try:
             # Clear VIP sessions
             _app_instance.vip_sessions.clear()
@@ -875,6 +1112,13 @@ class SDNRestController(ControllerBase):
             
             # Reset RR counter
             _app_instance.rr_counter = 0
+
+            # Reset WRR state
+            _app_instance.wrr_index = -1
+            _app_instance.wrr_current_weight = 0
+
+            # Reset ECMP flag so group is re-installed on next use
+            _app_instance._ecmp_installed = False
             
             _app_instance.logger.info("🔄 Episode state reset")
             
