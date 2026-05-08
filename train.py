@@ -31,7 +31,7 @@ logger.setLevel(logging.INFO)  # Default level
 from drl_agent import DQNAgent
 # from trainer import get_port_and_flow_stats, get_host_ports, post_flow_entry, detect_dpids
 # build_state is now local or imported from controller logic, let's redefine it here to match controller
-from traffic_generator import TrafficGenerator, ConstantTraffic, BurstyTraffic, IncrementalTraffic
+from traffic_generator import TrafficGenerator, ConstantTraffic, BurstyTraffic, IncrementalTraffic, SinusoidalTraffic
 from real_server_monitor import ServerMonitor, collect_real_server_metrics, calculate_reward_from_real_load
 from setup_network import setup_complete_routing
 
@@ -542,13 +542,17 @@ class RealLoadBalancerTrainer:
         if logger.isEnabledFor(logging.DEBUG):
              self.server_monitor.print_status()
         
-        # --- Phase 3A: Determine synthetic failure injection for this episode ---
+        # --- Phase 3A: Enhanced failure injection with 5 failure modes ---
         fi_cfg = self.config.get('training', {}).get('failure_injection', {})
         fi_enabled = fi_cfg.get('enabled', False)
-        fi_start_ep = fi_cfg.get('start_episode', 50)
-        fi_prob = fi_cfg.get('probability', 0.3)
-        fi_duration = fi_cfg.get('duration_steps', 8)
-        fi_multi_prob = fi_cfg.get('multi_server_prob', 0.1)
+        fi_start_ep = fi_cfg.get('start_episode', 80)
+        fi_prob = fi_cfg.get('probability', 0.45)
+        fi_duration = fi_cfg.get('duration_steps', 15)
+        fi_multi_prob = fi_cfg.get('multi_server_prob', 0.30)
+        fi_all_prob = fi_cfg.get('all_server_prob', 0.05)
+        fi_cascading_prob = fi_cfg.get('cascading_prob', 0.20)
+        fi_variable_dur = fi_cfg.get('variable_duration', True)
+        fi_flap_prob = fi_cfg.get('recovery_oscillation', 0.15)
 
         inject_failure = (
             fi_enabled
@@ -556,30 +560,95 @@ class RealLoadBalancerTrainer:
             and np.random.random() < fi_prob
         )
 
-        # Pre-compute failure schedule for this episode
-        synth_failure_server = -1
-        synth_failure_server_2 = -1
-        synth_failure_start = -1
-        synth_failure_end = -1
+        # Build a per-step failure schedule: failure_schedule[step] = set of dead server indices
+        failure_schedule = {}  # step -> set({0, 1, 2})
+        failure_mode = 'none'
 
         if inject_failure:
-            synth_failure_server = int(np.random.randint(3))
-            max_start = max(1, int(episode_duration) - fi_duration - 5)
-            synth_failure_start = int(np.random.randint(3, max_start))
-            synth_failure_end = synth_failure_start + fi_duration
+            # Determine actual duration (variable or fixed)
+            if fi_variable_dur:
+                actual_duration = int(np.random.randint(5, min(20, int(episode_duration) - 5)))
+            else:
+                actual_duration = fi_duration
 
-            # Optionally kill a second server (higher difficulty)
-            if np.random.random() < fi_multi_prob:
-                candidates = [i for i in range(3) if i != synth_failure_server]
-                synth_failure_server_2 = int(np.random.choice(candidates))
+            max_start = max(1, int(episode_duration) - actual_duration - 3)
+            failure_start = int(np.random.randint(3, max_start))
 
-            servers_str = str(synth_failure_server)
-            if synth_failure_server_2 >= 0:
-                servers_str += f",{synth_failure_server_2}"
-            logger.info(
-                f"[INJECT] Synthetic failure: server(s) {servers_str} "
-                f"steps {synth_failure_start}-{synth_failure_end}"
-            )
+            roll = np.random.random()
+
+            if roll < fi_all_prob:
+                # --- Mode 1: Total outage (all 3 servers down briefly, then recover) ---
+                failure_mode = 'total_outage'
+                outage_dur = min(actual_duration, int(np.random.randint(3, 8)))
+                for step in range(failure_start, failure_start + outage_dur):
+                    failure_schedule[step] = {0, 1, 2}
+                logger.info(
+                    f"[INJECT] TOTAL OUTAGE: all 3 servers down "
+                    f"steps {failure_start}-{failure_start + outage_dur}"
+                )
+
+            elif roll < fi_all_prob + fi_cascading_prob:
+                # --- Mode 2: Cascading failure (server A fails, then B fails later) ---
+                failure_mode = 'cascading'
+                server_a = int(np.random.randint(3))
+                remaining = [i for i in range(3) if i != server_a]
+                server_b = int(np.random.choice(remaining))
+                # Server A fails first
+                cascade_gap = int(np.random.randint(3, max(4, actual_duration // 2)))
+                dur_a = actual_duration
+                dur_b = max(3, actual_duration - cascade_gap)
+                for step in range(failure_start, failure_start + dur_a):
+                    failure_schedule.setdefault(step, set()).add(server_a)
+                for step in range(failure_start + cascade_gap, failure_start + cascade_gap + dur_b):
+                    failure_schedule.setdefault(step, set()).add(server_b)
+                logger.info(
+                    f"[INJECT] CASCADING: server {server_a} down at step {failure_start}, "
+                    f"server {server_b} down at step {failure_start + cascade_gap}"
+                )
+
+            elif roll < fi_all_prob + fi_cascading_prob + fi_flap_prob:
+                # --- Mode 3: Flapping / oscillation (fail-recover-fail) ---
+                failure_mode = 'flapping'
+                server_f = int(np.random.randint(3))
+                # 2-3 flap cycles
+                num_flaps = int(np.random.randint(2, 4))
+                flap_on = max(2, actual_duration // (num_flaps * 2))
+                flap_off = max(2, actual_duration // (num_flaps * 3))
+                pos = failure_start
+                for _ in range(num_flaps):
+                    for step in range(pos, min(pos + flap_on, int(episode_duration))):
+                        failure_schedule.setdefault(step, set()).add(server_f)
+                    pos += flap_on + flap_off
+                logger.info(
+                    f"[INJECT] FLAPPING: server {server_f} flapping {num_flaps}x "
+                    f"starting step {failure_start}"
+                )
+
+            elif np.random.random() < fi_multi_prob:
+                # --- Mode 4: Simultaneous multi-server failure (2 servers) ---
+                failure_mode = 'multi_server'
+                server_a = int(np.random.randint(3))
+                remaining = [i for i in range(3) if i != server_a]
+                server_b = int(np.random.choice(remaining))
+                for step in range(failure_start, failure_start + actual_duration):
+                    failure_schedule[step] = {server_a, server_b}
+                logger.info(
+                    f"[INJECT] MULTI-SERVER: servers {server_a},{server_b} down "
+                    f"steps {failure_start}-{failure_start + actual_duration}"
+                )
+
+            else:
+                # --- Mode 5: Single server failure (baseline) ---
+                failure_mode = 'single'
+                server_f = int(np.random.randint(3))
+                for step in range(failure_start, failure_start + actual_duration):
+                    failure_schedule[step] = {server_f}
+                logger.info(
+                    f"[INJECT] SINGLE: server {server_f} down "
+                    f"steps {failure_start}-{failure_start + actual_duration}"
+                )
+
+            logger.info(f"[INJECT] Failure mode: {failure_mode} | Total affected steps: {len(failure_schedule)}")
         
         # Start traffic generation
         traffic_thread = threading.Thread(
@@ -609,14 +678,14 @@ class RealLoadBalancerTrainer:
                 dtype=np.float32,
             )
             
-            # --- Phase 3A: Override alive with synthetic failure ---
-            if inject_failure and synth_failure_start <= step_count < synth_failure_end:
-                alive[synth_failure_server] = 0.0
-                if synth_failure_server_2 >= 0:
-                    alive[synth_failure_server_2] = 0.0
-                if step_count == synth_failure_start:
+            # --- Phase 3A: Override alive with failure schedule ---
+            if inject_failure and step_count in failure_schedule:
+                dead_servers = failure_schedule[step_count]
+                for srv_idx in dead_servers:
+                    alive[srv_idx] = 0.0
+                if step_count == min(failure_schedule.keys()):
                     logger.info(
-                        f"[INJECT] Synthetic failure ACTIVE: "
+                        f"[INJECT] Failure ACTIVE ({failure_mode}): "
                         f"alive={alive.tolist()} (step {step_count})"
                     )
 
@@ -658,11 +727,10 @@ class RealLoadBalancerTrainer:
                 [float(is_server_alive(ip, net=self.net)) for ip in SERVER_IPS],
                 dtype=np.float32,
             )
-            # Apply synthetic failure override to next_alive as well
-            if inject_failure and synth_failure_start <= step_count < synth_failure_end:
-                next_alive[synth_failure_server] = 0.0
-                if synth_failure_server_2 >= 0:
-                    next_alive[synth_failure_server_2] = 0.0
+            # Apply failure schedule override to next_alive as well
+            if inject_failure and step_count in failure_schedule:
+                for srv_idx in failure_schedule[step_count]:
+                    next_alive[srv_idx] = 0.0
 
             next_metrics = self.server_monitor.get_metrics()
             next_state = build_state(next_metrics, alive=next_alive)
@@ -873,17 +941,21 @@ class RealLoadBalancerTrainer:
             num_episodes = self.config['training']['episodes']
             episode_duration = self.config['training']['episode_duration']
             
-            # Traffic patterns
+            # Traffic patterns — 7 diverse scenarios for robust learning
             patterns = [
-                ConstantTraffic(rate=100, duration=episode_duration),
-                BurstyTraffic(base_rate=50, burst_rate=400, duration=episode_duration),
-                IncrementalTraffic(start_rate=50, end_rate=300, duration=episode_duration)
+                ConstantTraffic(rate=100, duration=episode_duration),              # Moderate steady
+                BurstyTraffic(base_rate=50, burst_rate=400, duration=episode_duration),   # Standard burst
+                IncrementalTraffic(start_rate=50, end_rate=300, duration=episode_duration), # Ramp up
+                SinusoidalTraffic(base_rate=100, amplitude=150, duration=episode_duration), # Wave pattern
+                ConstantTraffic(rate=300, duration=episode_duration),              # High-load stress
+                ConstantTraffic(rate=30, duration=episode_duration),               # Low-load (idle bias)
+                BurstyTraffic(base_rate=20, burst_rate=600, duration=episode_duration),   # Extreme burst
             ]
             
             self.training_active = True
             
             # Evaluation config
-            eval_every = 20
+            eval_every = 50   # Evaluate every 50 episodes for 1000-ep training
             baseline_eval = None
             best_eval_reward = -float('inf')
             

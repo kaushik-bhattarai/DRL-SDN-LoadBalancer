@@ -10,24 +10,28 @@ drl:
   hidden_dim: 64          # Neural network hidden layer size
   epsilon_start: 1.0      # Initial exploration rate
   epsilon_min: 0.05       # Minimum exploration rate
-  epsilon_decay: 0.9998   # Per-step decay: 0.9998^15000 ≈ 0.05 (~500 episodes × 30 steps)
+  epsilon_decay: 0.99993  # Per-step decay: 0.99993^45000 ≈ 0.05 (~1000 episodes × 45 steps)
   learning_rate: 0.0003   # Reduced learning rate for stability
 
 # Training Configuration
 training:
-  episodes: 200           # Number of training episodes
-  episode_duration: 30    # Duration of each episode in seconds
+  episodes: 1000          # Extended training for robust policy
+  episode_duration: 45    # Longer episodes for deeper learning per episode
   batch_size: 32          # Batch size for training
-  memory_size: 10000      # Replay buffer size
+  memory_size: 50000      # 5× larger replay buffer for 1000 episodes
   gamma: 0.99             # Discount factor for future rewards
 
-  # Phase 3: Synthetic failure injection during training
+  # Enhanced failure injection — aggressive multi-scenario training
   failure_injection:
     enabled: true
-    start_episode: 50        # Begin injection after basic policy is learned
-    probability: 0.3         # 30% of episodes after start_episode get a failure
-    duration_steps: 8        # ~8 seconds of simulated failure per injection
-    multi_server_prob: 0.1   # 10% chance of killing 2 servers simultaneously
+    start_episode: 80        # Begin after basic load-balancing policy converges
+    probability: 0.45        # 45% of episodes after start_episode get failures
+    duration_steps: 15       # ~15 seconds of simulated failure per injection
+    multi_server_prob: 0.30  # 30% chance of killing 2 servers simultaneously
+    all_server_prob: 0.05    # 5% chance of total outage (all 3 down briefly)
+    cascading_prob: 0.20     # 20% chance of cascading failure (staggered kills)
+    variable_duration: true  # Randomize duration between 5–20 steps
+    recovery_oscillation: 0.15  # 15% chance of flapping (fail-recover-fail)
 
   # Phase 5: Prioritized Experience Replay (conditional — see gate check)
   per:
@@ -47,7 +51,7 @@ traffic:
   patterns:
     - type: "constant"
       rate: 100            # requests per second
-      duration: 30
+      duration: 45
     
     - type: "bursty"
       base_rate: 50
@@ -75,8 +79,8 @@ topology:
 
 # Evaluation Settings
 evaluation:
-  num_episodes: 10
-  episode_duration: 30
+  num_episodes: 20
+  episode_duration: 45
 
 # Logging
 logging:

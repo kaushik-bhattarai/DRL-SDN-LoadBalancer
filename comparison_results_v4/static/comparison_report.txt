@@ -1,0 +1,29 @@
+========================================================================
+COMPARATIVE ANALYSIS REPORT — DRL vs Baselines
+Generated: 2026-05-03T13:36:01.490886
+Duration: 60s | Trials: 10 | Pattern: constant | RPS: 80
+========================================================================
+
+Algorithm                       Fairness      Avg RTT(ms)     Throughput   Overhead(µs)
+---------------------------------------------------------------------------------------
+round_robin                1.000±0.000    23.37±0.37      59.9±30.5           2203
+weighted_round_robin       1.000±0.000    23.32±26.85     59.7±29.9           2311
+random                     0.997±0.006    23.14±0.95      60.4±30.5           2382
+least_connections          0.997±0.005    23.39±0.36      60.0±31.8           2244
+hash_based                 0.998±0.005    21.79±1.52      62.1±31.5           2244
+ecmp                       1.000±0.000    22.38±1.40      61.0±29.6           1992
+drl                        0.923±0.140    23.25±0.44      62.1±30.7           2328
+
+--- Tradeoff Verdicts vs DRL ---
+  round_robin: fairer
+  weighted_round_robin: fairer
+  random: fairer
+  least_connections: fairer
+  hash_based: fairer
+  ecmp: fairer
+
+--- Server Bias Check (DRL) ---
+  h1: 32.9%  h2: 33.9%  h3: 33.2%
+  ✅ No significant server bias detected.
+
+========================================================================
