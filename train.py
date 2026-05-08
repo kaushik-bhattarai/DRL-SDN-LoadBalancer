@@ -31,7 +31,7 @@ logger.setLevel(logging.INFO)  # Default level
 from drl_agent import DQNAgent
 # from trainer import get_port_and_flow_stats, get_host_ports, post_flow_entry, detect_dpids
 # build_state is now local or imported from controller logic, let's redefine it here to match controller
-from traffic_generator import TrafficGenerator, ConstantTraffic, BurstyTraffic, IncrementalTraffic
+from traffic_generator import TrafficGenerator, ConstantTraffic, BurstyTraffic, IncrementalTraffic, SinusoidalTraffic
 from real_server_monitor import ServerMonitor, collect_real_server_metrics, calculate_reward_from_real_load
 from setup_network import setup_complete_routing
 
@@ -520,8 +520,16 @@ class RealLoadBalancerTrainer:
         """
         Train one episode with REAL traffic and metrics.
 
-        Includes Fix 2 (liveness), Fix 3 (load masking), Fix 4 (state vector),
-        and Fix 6 (episode abort on prolonged server death).
+        Includes Fix 2 (liveness), Fix 3 (load masking), Fix 4 (state vector).
+
+        Phase 3 changes:
+        - (3A) Synthetic failure injection after episode 50 to expose the agent
+          to alive=0 transitions that are otherwise absent from training.
+        - (3B) Removed episode-abort-on-death.  Previously, any natural failure
+          caused the episode to abort and ALL transitions to be discarded,
+          completely preventing the agent from learning failure responses.
+          Now the episode continues and the -1.0 dead-server reward teaches
+          the agent directly.
         """
         logger.info(f"{'='*30} Episode {episode_num+1} {'='*30}")
         logger.info(f"Pattern: {traffic_pattern.name} | Duration: {episode_duration}s")
@@ -533,6 +541,114 @@ class RealLoadBalancerTrainer:
         logger.debug("[BEFORE] Initial server status:")
         if logger.isEnabledFor(logging.DEBUG):
              self.server_monitor.print_status()
+        
+        # --- Phase 3A: Enhanced failure injection with 5 failure modes ---
+        fi_cfg = self.config.get('training', {}).get('failure_injection', {})
+        fi_enabled = fi_cfg.get('enabled', False)
+        fi_start_ep = fi_cfg.get('start_episode', 80)
+        fi_prob = fi_cfg.get('probability', 0.45)
+        fi_duration = fi_cfg.get('duration_steps', 15)
+        fi_multi_prob = fi_cfg.get('multi_server_prob', 0.30)
+        fi_all_prob = fi_cfg.get('all_server_prob', 0.05)
+        fi_cascading_prob = fi_cfg.get('cascading_prob', 0.20)
+        fi_variable_dur = fi_cfg.get('variable_duration', True)
+        fi_flap_prob = fi_cfg.get('recovery_oscillation', 0.15)
+
+        inject_failure = (
+            fi_enabled
+            and episode_num >= fi_start_ep
+            and np.random.random() < fi_prob
+        )
+
+        # Build a per-step failure schedule: failure_schedule[step] = set of dead server indices
+        failure_schedule = {}  # step -> set({0, 1, 2})
+        failure_mode = 'none'
+
+        if inject_failure:
+            # Determine actual duration (variable or fixed)
+            if fi_variable_dur:
+                actual_duration = int(np.random.randint(5, min(20, int(episode_duration) - 5)))
+            else:
+                actual_duration = fi_duration
+
+            max_start = max(1, int(episode_duration) - actual_duration - 3)
+            failure_start = int(np.random.randint(3, max_start))
+
+            roll = np.random.random()
+
+            if roll < fi_all_prob:
+                # --- Mode 1: Total outage (all 3 servers down briefly, then recover) ---
+                failure_mode = 'total_outage'
+                outage_dur = min(actual_duration, int(np.random.randint(3, 8)))
+                for step in range(failure_start, failure_start + outage_dur):
+                    failure_schedule[step] = {0, 1, 2}
+                logger.info(
+                    f"[INJECT] TOTAL OUTAGE: all 3 servers down "
+                    f"steps {failure_start}-{failure_start + outage_dur}"
+                )
+
+            elif roll < fi_all_prob + fi_cascading_prob:
+                # --- Mode 2: Cascading failure (server A fails, then B fails later) ---
+                failure_mode = 'cascading'
+                server_a = int(np.random.randint(3))
+                remaining = [i for i in range(3) if i != server_a]
+                server_b = int(np.random.choice(remaining))
+                # Server A fails first
+                cascade_gap = int(np.random.randint(3, max(4, actual_duration // 2)))
+                dur_a = actual_duration
+                dur_b = max(3, actual_duration - cascade_gap)
+                for step in range(failure_start, failure_start + dur_a):
+                    failure_schedule.setdefault(step, set()).add(server_a)
+                for step in range(failure_start + cascade_gap, failure_start + cascade_gap + dur_b):
+                    failure_schedule.setdefault(step, set()).add(server_b)
+                logger.info(
+                    f"[INJECT] CASCADING: server {server_a} down at step {failure_start}, "
+                    f"server {server_b} down at step {failure_start + cascade_gap}"
+                )
+
+            elif roll < fi_all_prob + fi_cascading_prob + fi_flap_prob:
+                # --- Mode 3: Flapping / oscillation (fail-recover-fail) ---
+                failure_mode = 'flapping'
+                server_f = int(np.random.randint(3))
+                # 2-3 flap cycles
+                num_flaps = int(np.random.randint(2, 4))
+                flap_on = max(2, actual_duration // (num_flaps * 2))
+                flap_off = max(2, actual_duration // (num_flaps * 3))
+                pos = failure_start
+                for _ in range(num_flaps):
+                    for step in range(pos, min(pos + flap_on, int(episode_duration))):
+                        failure_schedule.setdefault(step, set()).add(server_f)
+                    pos += flap_on + flap_off
+                logger.info(
+                    f"[INJECT] FLAPPING: server {server_f} flapping {num_flaps}x "
+                    f"starting step {failure_start}"
+                )
+
+            elif np.random.random() < fi_multi_prob:
+                # --- Mode 4: Simultaneous multi-server failure (2 servers) ---
+                failure_mode = 'multi_server'
+                server_a = int(np.random.randint(3))
+                remaining = [i for i in range(3) if i != server_a]
+                server_b = int(np.random.choice(remaining))
+                for step in range(failure_start, failure_start + actual_duration):
+                    failure_schedule[step] = {server_a, server_b}
+                logger.info(
+                    f"[INJECT] MULTI-SERVER: servers {server_a},{server_b} down "
+                    f"steps {failure_start}-{failure_start + actual_duration}"
+                )
+
+            else:
+                # --- Mode 5: Single server failure (baseline) ---
+                failure_mode = 'single'
+                server_f = int(np.random.randint(3))
+                for step in range(failure_start, failure_start + actual_duration):
+                    failure_schedule[step] = {server_f}
+                logger.info(
+                    f"[INJECT] SINGLE: server {server_f} down "
+                    f"steps {failure_start}-{failure_start + actual_duration}"
+                )
+
+            logger.info(f"[INJECT] Failure mode: {failure_mode} | Total affected steps: {len(failure_schedule)}")
         
         # Start traffic generation
         traffic_thread = threading.Thread(
@@ -554,13 +670,6 @@ class RealLoadBalancerTrainer:
         diag_loads = {h: [] for h in HOST_NAMES}
         reward_components = {'imbalance': [], 'reward': []}
         
-        # --- Fix 6: Track consecutive dead-server steps for episode abort ---
-        consecutive_dead_steps = 0
-        DEAD_STEP_THRESHOLD = 3
-        episode_aborted = False
-        # Remember how many transitions we had before this episode
-        memory_start_len = len(self.agent.memory)
-        
         # Training loop
         while time.time() - start_time < episode_duration:
             # --- Fix 2: Server liveness check ---
@@ -569,19 +678,28 @@ class RealLoadBalancerTrainer:
                 dtype=np.float32,
             )
             
-            # --- Fix 6: Track consecutive dead steps ---
-            if (alive == 0.0).any():
-                consecutive_dead_steps += 1
-                dead_hosts = [HOST_NAMES[i] for i in range(3) if alive[i] == 0.0]
-                if consecutive_dead_steps >= DEAD_STEP_THRESHOLD:
-                    logger.warning(
-                        f"Episode {episode_num+1} aborted: server {', '.join(dead_hosts)} "
-                        f"unreachable for {consecutive_dead_steps}+ steps"
+            # --- Phase 3A: Override alive with failure schedule ---
+            if inject_failure and step_count in failure_schedule:
+                dead_servers = failure_schedule[step_count]
+                for srv_idx in dead_servers:
+                    alive[srv_idx] = 0.0
+                if step_count == min(failure_schedule.keys()):
+                    logger.info(
+                        f"[INJECT] Failure ACTIVE ({failure_mode}): "
+                        f"alive={alive.tolist()} (step {step_count})"
                     )
-                    episode_aborted = True
-                    break
-            else:
-                consecutive_dead_steps = 0
+
+            # --- Phase 3B: Log dead servers but DO NOT abort ---
+            # (Previously, 3+ consecutive dead steps aborted the episode and
+            #  discarded all transitions — preventing the agent from ever
+            #  learning failure responses.)
+            if (alive == 0.0).any():
+                dead_hosts = [HOST_NAMES[i] for i in range(3) if alive[i] == 0.0]
+                if step_count % 5 == 0:
+                    logger.warning(
+                        f"Dead servers detected: {', '.join(dead_hosts)} — "
+                        f"continuing episode (step {step_count})"
+                    )
             
             # 1. Observe state s (with liveness and load masking)
             current_metrics = self.server_monitor.get_metrics()
@@ -609,6 +727,11 @@ class RealLoadBalancerTrainer:
                 [float(is_server_alive(ip, net=self.net)) for ip in SERVER_IPS],
                 dtype=np.float32,
             )
+            # Apply failure schedule override to next_alive as well
+            if inject_failure and step_count in failure_schedule:
+                for srv_idx in failure_schedule[step_count]:
+                    next_alive[srv_idx] = 0.0
+
             next_metrics = self.server_monitor.get_metrics()
             next_state = build_state(next_metrics, alive=next_alive)
             
@@ -682,31 +805,6 @@ class RealLoadBalancerTrainer:
                 
         # Wait for traffic thread
         traffic_thread.join(timeout=2)
-        
-        # --- Fix 6: Discard this episode's experience if aborted ---
-        if episode_aborted:
-            # Remove transitions added during this episode from replay buffer
-            memory_end_len = len(self.agent.memory)
-            transitions_to_remove = memory_end_len - memory_start_len
-            if transitions_to_remove > 0:
-                for _ in range(transitions_to_remove):
-                    self.agent.memory.pop()
-                logger.warning(
-                    f"Discarded {transitions_to_remove} transitions from aborted episode {episode_num+1}"
-                )
-            # Still record summary stats even for aborted episodes
-            self.episode_rewards.append(0.0)
-            self.episode_losses.append(0.0)
-            self.episode_metrics.append({
-                'total_requests': self.traffic_gen.stats['total_requests'],
-                'successful_requests': self.traffic_gen.stats['successful_requests'],
-                'load_variance': 0.0,
-                'action_distribution': action_counts,
-                'aborted': True,
-            })
-            logger.info(f"Summary Ep {episode_num+1}: ABORTED (server death) | Steps={step_count}")
-            logger.info("-" * 40)
-            return
         
         # Show final server status
         logger.debug("[AFTER] Final server status:")
@@ -843,17 +941,21 @@ class RealLoadBalancerTrainer:
             num_episodes = self.config['training']['episodes']
             episode_duration = self.config['training']['episode_duration']
             
-            # Traffic patterns
+            # Traffic patterns — 7 diverse scenarios for robust learning
             patterns = [
-                ConstantTraffic(rate=100, duration=episode_duration),
-                BurstyTraffic(base_rate=50, burst_rate=400, duration=episode_duration),
-                IncrementalTraffic(start_rate=50, end_rate=300, duration=episode_duration)
+                ConstantTraffic(rate=100, duration=episode_duration),              # Moderate steady
+                BurstyTraffic(base_rate=50, burst_rate=400, duration=episode_duration),   # Standard burst
+                IncrementalTraffic(start_rate=50, end_rate=300, duration=episode_duration), # Ramp up
+                SinusoidalTraffic(base_rate=100, amplitude=150, duration=episode_duration), # Wave pattern
+                ConstantTraffic(rate=300, duration=episode_duration),              # High-load stress
+                ConstantTraffic(rate=30, duration=episode_duration),               # Low-load (idle bias)
+                BurstyTraffic(base_rate=20, burst_rate=600, duration=episode_duration),   # Extreme burst
             ]
             
             self.training_active = True
             
             # Evaluation config
-            eval_every = 20
+            eval_every = 50   # Evaluate every 50 episodes for 1000-ep training
             baseline_eval = None
             best_eval_reward = -float('inf')
             

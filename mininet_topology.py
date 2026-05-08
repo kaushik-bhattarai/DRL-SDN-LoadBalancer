@@ -1,10 +1,29 @@
 from mininet.topo import Topo
 from mininet.net import Mininet
-from mininet.node import RemoteController, OVSSwitch
+from mininet.node import RemoteController, OVSSwitch, Node
 from mininet.link import TCLink
 from mininet.log import setLogLevel
 from mininet.cli import CLI
 from functools import partial
+import threading
+
+# --- Monkey-patch Mininet Node to ensure thread-safe cmd() execution ---
+_old_cmd = Node.cmd
+_old_init = Node.__init__
+
+def _new_init(self, *args, **kwargs):
+    _old_init(self, *args, **kwargs)
+    self._cmd_lock = threading.Lock()
+
+def _new_cmd(self, *args, **kwargs):
+    if not hasattr(self, '_cmd_lock'):
+        self._cmd_lock = threading.Lock()
+    with self._cmd_lock:
+        return _old_cmd(self, *args, **kwargs)
+
+Node.__init__ = _new_init
+Node.cmd = _new_cmd
+# -----------------------------------------------------------------------
 
 class FatTree4(Topo):
     def build(self, k=4):
